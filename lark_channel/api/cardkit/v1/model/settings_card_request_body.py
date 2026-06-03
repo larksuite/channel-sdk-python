@@ -1,0 +1,40 @@
+from typing import Any, Optional, Union, Dict, List, Set, IO, Callable, Type
+from lark_channel.core.construct import init
+
+
+class SettingsCardRequestBody(object):
+    _types = {
+        "settings": str,
+        "uuid": str,
+        "sequence": int,
+    }
+
+    def __init__(self, d=None):
+        self.settings: Optional[str] = None
+        self.uuid: Optional[str] = None
+        self.sequence: Optional[int] = None
+        init(self, d, self._types)
+
+    @staticmethod
+    def builder() -> "SettingsCardRequestBodyBuilder":
+        return SettingsCardRequestBodyBuilder()
+
+
+class SettingsCardRequestBodyBuilder(object):
+    def __init__(self) -> None:
+        self._settings_card_request_body = SettingsCardRequestBody()
+
+    def settings(self, settings: str) -> "SettingsCardRequestBodyBuilder":
+        self._settings_card_request_body.settings = settings
+        return self
+
+    def uuid(self, uuid: str) -> "SettingsCardRequestBodyBuilder":
+        self._settings_card_request_body.uuid = uuid
+        return self
+
+    def sequence(self, sequence: int) -> "SettingsCardRequestBodyBuilder":
+        self._settings_card_request_body.sequence = sequence
+        return self
+
+    def build(self) -> "SettingsCardRequestBody":
+        return self._settings_card_request_body

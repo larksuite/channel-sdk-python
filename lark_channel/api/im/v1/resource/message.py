@@ -1,0 +1,564 @@
+import io
+from typing import Any, Optional, Union, Dict, List, Set, IO, Callable, Type
+from lark_channel.core.const import UTF_8, CONTENT_TYPE, APPLICATION_JSON
+from lark_channel.core import JSON
+from lark_channel.core.token import verify
+from lark_channel.core.http import Transport
+from lark_channel.core.model import Config, RequestOption, RawResponse
+from lark_channel.core.utils import Files
+from requests_toolbelt import MultipartEncoder
+from ..model.create_message_request import CreateMessageRequest
+from ..model.create_message_response import CreateMessageResponse
+from ..model.delete_message_request import DeleteMessageRequest
+from ..model.delete_message_response import DeleteMessageResponse
+from ..model.forward_message_request import ForwardMessageRequest
+from ..model.forward_message_response import ForwardMessageResponse
+from ..model.get_message_request import GetMessageRequest
+from ..model.get_message_response import GetMessageResponse
+from ..model.list_message_request import ListMessageRequest
+from ..model.list_message_response import ListMessageResponse
+from ..model.merge_forward_message_request import MergeForwardMessageRequest
+from ..model.merge_forward_message_response import MergeForwardMessageResponse
+from ..model.patch_message_request import PatchMessageRequest
+from ..model.patch_message_response import PatchMessageResponse
+from ..model.push_follow_up_message_request import PushFollowUpMessageRequest
+from ..model.push_follow_up_message_response import PushFollowUpMessageResponse
+from ..model.read_users_message_request import ReadUsersMessageRequest
+from ..model.read_users_message_response import ReadUsersMessageResponse
+from ..model.reply_message_request import ReplyMessageRequest
+from ..model.reply_message_response import ReplyMessageResponse
+from ..model.update_message_request import UpdateMessageRequest
+from ..model.update_message_response import UpdateMessageResponse
+from ..model.urgent_app_message_request import UrgentAppMessageRequest
+from ..model.urgent_app_message_response import UrgentAppMessageResponse
+from ..model.urgent_phone_message_request import UrgentPhoneMessageRequest
+from ..model.urgent_phone_message_response import UrgentPhoneMessageResponse
+from ..model.urgent_sms_message_request import UrgentSmsMessageRequest
+from ..model.urgent_sms_message_response import UrgentSmsMessageResponse
+
+
+class Message(object):
+    def __init__(self, config: Config) -> None:
+        self.config: Config = config
+
+    def create(self, request: CreateMessageRequest, option: Optional[RequestOption] = None) -> CreateMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Add content-type
+        if request.body is not None:
+            option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+
+        # Send the request
+        resp: RawResponse = Transport.execute(self.config, request, option)
+
+        # Deserialize the response
+        response: CreateMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), CreateMessageResponse)
+        response.raw = resp
+
+        return response
+
+    async def acreate(self, request: CreateMessageRequest,
+                      option: Optional[RequestOption] = None) -> CreateMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Send the request
+        resp: RawResponse = await Transport.aexecute(self.config, request, option)
+
+        # Deserialize the response
+        response: CreateMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), CreateMessageResponse)
+        response.raw = resp
+
+        return response
+
+    def delete(self, request: DeleteMessageRequest, option: Optional[RequestOption] = None) -> DeleteMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Add content-type
+        if request.body is not None:
+            option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+
+        # Send the request
+        resp: RawResponse = Transport.execute(self.config, request, option)
+
+        # Deserialize the response
+        response: DeleteMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), DeleteMessageResponse)
+        response.raw = resp
+
+        return response
+
+    async def adelete(self, request: DeleteMessageRequest,
+                      option: Optional[RequestOption] = None) -> DeleteMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Send the request
+        resp: RawResponse = await Transport.aexecute(self.config, request, option)
+
+        # Deserialize the response
+        response: DeleteMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), DeleteMessageResponse)
+        response.raw = resp
+
+        return response
+
+    def forward(self, request: ForwardMessageRequest, option: Optional[RequestOption] = None) -> ForwardMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Add content-type
+        if request.body is not None:
+            option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+
+        # Send the request
+        resp: RawResponse = Transport.execute(self.config, request, option)
+
+        # Deserialize the response
+        response: ForwardMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), ForwardMessageResponse)
+        response.raw = resp
+
+        return response
+
+    async def aforward(self, request: ForwardMessageRequest,
+                       option: Optional[RequestOption] = None) -> ForwardMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Send the request
+        resp: RawResponse = await Transport.aexecute(self.config, request, option)
+
+        # Deserialize the response
+        response: ForwardMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), ForwardMessageResponse)
+        response.raw = resp
+
+        return response
+
+    def get(self, request: GetMessageRequest, option: Optional[RequestOption] = None) -> GetMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Add content-type
+        if request.body is not None:
+            option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+
+        # Send the request
+        resp: RawResponse = Transport.execute(self.config, request, option)
+
+        # Deserialize the response
+        response: GetMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), GetMessageResponse)
+        response.raw = resp
+
+        return response
+
+    async def aget(self, request: GetMessageRequest, option: Optional[RequestOption] = None) -> GetMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Send the request
+        resp: RawResponse = await Transport.aexecute(self.config, request, option)
+
+        # Deserialize the response
+        response: GetMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), GetMessageResponse)
+        response.raw = resp
+
+        return response
+
+    def list(self, request: ListMessageRequest, option: Optional[RequestOption] = None) -> ListMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Add content-type
+        if request.body is not None:
+            option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+
+        # Send the request
+        resp: RawResponse = Transport.execute(self.config, request, option)
+
+        # Deserialize the response
+        response: ListMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), ListMessageResponse)
+        response.raw = resp
+
+        return response
+
+    async def alist(self, request: ListMessageRequest, option: Optional[RequestOption] = None) -> ListMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Send the request
+        resp: RawResponse = await Transport.aexecute(self.config, request, option)
+
+        # Deserialize the response
+        response: ListMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), ListMessageResponse)
+        response.raw = resp
+
+        return response
+
+    def merge_forward(self, request: MergeForwardMessageRequest,
+                      option: Optional[RequestOption] = None) -> MergeForwardMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Add content-type
+        if request.body is not None:
+            option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+
+        # Send the request
+        resp: RawResponse = Transport.execute(self.config, request, option)
+
+        # Deserialize the response
+        response: MergeForwardMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), MergeForwardMessageResponse)
+        response.raw = resp
+
+        return response
+
+    async def amerge_forward(self, request: MergeForwardMessageRequest,
+                             option: Optional[RequestOption] = None) -> MergeForwardMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Send the request
+        resp: RawResponse = await Transport.aexecute(self.config, request, option)
+
+        # Deserialize the response
+        response: MergeForwardMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), MergeForwardMessageResponse)
+        response.raw = resp
+
+        return response
+
+    def patch(self, request: PatchMessageRequest, option: Optional[RequestOption] = None) -> PatchMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Add content-type
+        if request.body is not None:
+            option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+
+        # Send the request
+        resp: RawResponse = Transport.execute(self.config, request, option)
+
+        # Deserialize the response
+        response: PatchMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), PatchMessageResponse)
+        response.raw = resp
+
+        return response
+
+    async def apatch(self, request: PatchMessageRequest,
+                     option: Optional[RequestOption] = None) -> PatchMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Send the request
+        resp: RawResponse = await Transport.aexecute(self.config, request, option)
+
+        # Deserialize the response
+        response: PatchMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), PatchMessageResponse)
+        response.raw = resp
+
+        return response
+
+    def push_follow_up(self, request: PushFollowUpMessageRequest,
+                       option: Optional[RequestOption] = None) -> PushFollowUpMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Add content-type
+        if request.body is not None:
+            option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+
+        # Send the request
+        resp: RawResponse = Transport.execute(self.config, request, option)
+
+        # Deserialize the response
+        response: PushFollowUpMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), PushFollowUpMessageResponse)
+        response.raw = resp
+
+        return response
+
+    async def apush_follow_up(self, request: PushFollowUpMessageRequest,
+                              option: Optional[RequestOption] = None) -> PushFollowUpMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Send the request
+        resp: RawResponse = await Transport.aexecute(self.config, request, option)
+
+        # Deserialize the response
+        response: PushFollowUpMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), PushFollowUpMessageResponse)
+        response.raw = resp
+
+        return response
+
+    def read_users(self, request: ReadUsersMessageRequest,
+                   option: Optional[RequestOption] = None) -> ReadUsersMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Add content-type
+        if request.body is not None:
+            option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+
+        # Send the request
+        resp: RawResponse = Transport.execute(self.config, request, option)
+
+        # Deserialize the response
+        response: ReadUsersMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), ReadUsersMessageResponse)
+        response.raw = resp
+
+        return response
+
+    async def aread_users(self, request: ReadUsersMessageRequest,
+                          option: Optional[RequestOption] = None) -> ReadUsersMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Send the request
+        resp: RawResponse = await Transport.aexecute(self.config, request, option)
+
+        # Deserialize the response
+        response: ReadUsersMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), ReadUsersMessageResponse)
+        response.raw = resp
+
+        return response
+
+    def reply(self, request: ReplyMessageRequest, option: Optional[RequestOption] = None) -> ReplyMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Add content-type
+        if request.body is not None:
+            option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+
+        # Send the request
+        resp: RawResponse = Transport.execute(self.config, request, option)
+
+        # Deserialize the response
+        response: ReplyMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), ReplyMessageResponse)
+        response.raw = resp
+
+        return response
+
+    async def areply(self, request: ReplyMessageRequest,
+                     option: Optional[RequestOption] = None) -> ReplyMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Send the request
+        resp: RawResponse = await Transport.aexecute(self.config, request, option)
+
+        # Deserialize the response
+        response: ReplyMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), ReplyMessageResponse)
+        response.raw = resp
+
+        return response
+
+    def update(self, request: UpdateMessageRequest, option: Optional[RequestOption] = None) -> UpdateMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Add content-type
+        if request.body is not None:
+            option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+
+        # Send the request
+        resp: RawResponse = Transport.execute(self.config, request, option)
+
+        # Deserialize the response
+        response: UpdateMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), UpdateMessageResponse)
+        response.raw = resp
+
+        return response
+
+    async def aupdate(self, request: UpdateMessageRequest,
+                      option: Optional[RequestOption] = None) -> UpdateMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Send the request
+        resp: RawResponse = await Transport.aexecute(self.config, request, option)
+
+        # Deserialize the response
+        response: UpdateMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), UpdateMessageResponse)
+        response.raw = resp
+
+        return response
+
+    def urgent_app(self, request: UrgentAppMessageRequest,
+                   option: Optional[RequestOption] = None) -> UrgentAppMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Add content-type
+        if request.body is not None:
+            option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+
+        # Send the request
+        resp: RawResponse = Transport.execute(self.config, request, option)
+
+        # Deserialize the response
+        response: UrgentAppMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), UrgentAppMessageResponse)
+        response.raw = resp
+
+        return response
+
+    async def aurgent_app(self, request: UrgentAppMessageRequest,
+                          option: Optional[RequestOption] = None) -> UrgentAppMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Send the request
+        resp: RawResponse = await Transport.aexecute(self.config, request, option)
+
+        # Deserialize the response
+        response: UrgentAppMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), UrgentAppMessageResponse)
+        response.raw = resp
+
+        return response
+
+    def urgent_phone(self, request: UrgentPhoneMessageRequest,
+                     option: Optional[RequestOption] = None) -> UrgentPhoneMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Add content-type
+        if request.body is not None:
+            option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+
+        # Send the request
+        resp: RawResponse = Transport.execute(self.config, request, option)
+
+        # Deserialize the response
+        response: UrgentPhoneMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), UrgentPhoneMessageResponse)
+        response.raw = resp
+
+        return response
+
+    async def aurgent_phone(self, request: UrgentPhoneMessageRequest,
+                            option: Optional[RequestOption] = None) -> UrgentPhoneMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Send the request
+        resp: RawResponse = await Transport.aexecute(self.config, request, option)
+
+        # Deserialize the response
+        response: UrgentPhoneMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), UrgentPhoneMessageResponse)
+        response.raw = resp
+
+        return response
+
+    def urgent_sms(self, request: UrgentSmsMessageRequest,
+                   option: Optional[RequestOption] = None) -> UrgentSmsMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Add content-type
+        if request.body is not None:
+            option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+
+        # Send the request
+        resp: RawResponse = Transport.execute(self.config, request, option)
+
+        # Deserialize the response
+        response: UrgentSmsMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), UrgentSmsMessageResponse)
+        response.raw = resp
+
+        return response
+
+    async def aurgent_sms(self, request: UrgentSmsMessageRequest,
+                          option: Optional[RequestOption] = None) -> UrgentSmsMessageResponse:
+        if option is None:
+            option = RequestOption()
+
+        # Authenticate and obtain a token
+        verify(self.config, request, option)
+
+        # Send the request
+        resp: RawResponse = await Transport.aexecute(self.config, request, option)
+
+        # Deserialize the response
+        response: UrgentSmsMessageResponse = JSON.unmarshal(str(resp.content, UTF_8), UrgentSmsMessageResponse)
+        response.raw = resp
+
+        return response

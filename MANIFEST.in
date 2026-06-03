@@ -1,0 +1,10 @@
+global-exclude */__pycache__/*
+global-exclude *.pyc
+global-exclude .pytest_cache/*
+include LICENSE
+include THIRD_PARTY_NOTICES.md
+include README.md
+include README.zh.md
+recursive-include docs *.md
+recursive-include samples/channel *.py
+prune tests

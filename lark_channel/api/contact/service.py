@@ -1,0 +1,7 @@
+from lark_channel.core.model import Config
+from .v3.version import V3
+
+
+class ContactService(object):
+    def __init__(self, config: Config) -> None:
+        self.v3: V3 = V3(config)
