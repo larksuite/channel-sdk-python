@@ -1,0 +1,15 @@
+from typing import Any, Optional, Union, Dict, List, Set, IO, Callable, Type
+from lark_channel.core.construct import init
+from lark_channel.core.model import BaseResponse
+from .list_message_reaction_response_body import ListMessageReactionResponseBody
+
+
+class ListMessageReactionResponse(BaseResponse):
+    _types = {
+        "data": ListMessageReactionResponseBody
+    }
+
+    def __init__(self, d=None):
+        super().__init__(d)
+        self.data: Optional[ListMessageReactionResponseBody] = None
+        init(self, d, self._types)
