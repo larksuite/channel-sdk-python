@@ -104,7 +104,9 @@ async def test_post_from_markdown_emits_post_msg():
     # Wrapping with "post" causes server error 230001 (invalid message content).
     assert "post" not in content
     zh = content["zh_cn"]
-    assert zh["content"][0][0]["text"] == "bold"
+    # Default tag_md_mode is now "native", so markdown is preserved as raw md node.
+    assert zh["content"][0][0]["tag"] == "md"
+    assert zh["content"][0][0]["text"] == "**bold**"
 
 
 @pytest.mark.asyncio

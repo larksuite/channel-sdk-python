@@ -153,6 +153,156 @@ def test_post_direct_document_shape_flattens_text_and_resources():
     assert r[0].file_key == "img_direct"
 
 
+def test_post_content_v2_md_preferred_and_post_processed():
+    post = {
+        "zh_cn": {
+            "title": "V2",
+            "content": [[{"tag": "text", "text": "legacy content"}]],
+            "content_v2": [
+                [
+                    {
+                        "tag": "md",
+                        "text": (
+                            'hello <at user_id="ou_1">Alice</at> '
+                            'and <at user_id="all">All</at> '
+                            "![diagram](img_v2)\n\n"
+                            "```text\n"
+                            '<at user_id="ou_code">Code</at> ![ignored](img_code)\n'
+                            "```"
+                        ),
+                    }
+                ]
+            ],
+        }
+    }
+
+    t, r = flatten(PostContent(post=post))
+
+    assert "# V2" in t
+    assert "legacy content" not in t
+    assert "hello @Alice and @all ![diagram](img_v2)" in t
+    assert '<at user_id="ou_code">Code</at> ![ignored](img_code)' in t
+    assert [(x.type, x.file_key) for x in r] == [("image", "img_v2")]
+
+
+def test_post_content_v2_empty_falls_back_to_content():
+    """An empty content_v2 list must fall back to legacy content paragraphs."""
+    post = {
+        "zh_cn": {
+            "title": "Fallback",
+            "content_v2": [],
+            "content": [[{"tag": "text", "text": "from legacy"}]],
+        }
+    }
+
+    t, r = flatten(PostContent(post=post))
+
+    assert "# Fallback" in t
+    assert "from legacy" in t
+    assert r == []
+
+
+def test_post_content_v2_non_list_falls_back_to_content():
+    """A non-list content_v2 (malformed) must fall back to legacy content."""
+    post = {
+        "zh_cn": {
+            "title": "Bad",
+            "content_v2": "not-a-list",
+            "content": [[{"tag": "text", "text": "still works"}]],
+        }
+    }
+
+    t, _ = flatten(PostContent(post=post))
+
+    assert "still works" in t
+
+
+def test_post_md_text_at_all_members_alias_and_unnamed_at():
+    """`all_members` resolves to @all; <at> without inner text falls back to user_id."""
+    post = {
+        "zh_cn": {
+            "content_v2": [
+                [
+                    {
+                        "tag": "md",
+                        "text": (
+                            'hi <at user_id="all_members"></at> '
+                            'and <at user_id="ou_42"></at> done'
+                        ),
+                    }
+                ]
+            ],
+        }
+    }
+
+    t, r = flatten(PostContent(post=post))
+
+    assert "hi @all and @ou_42 done" in t
+    assert r == []
+
+
+def test_post_md_text_unclosed_fence_is_treated_as_outside():
+    """An unclosed code fence must not protect at-mentions / image keys after it."""
+    post = {
+        "zh_cn": {
+            "content_v2": [
+                [
+                    {
+                        "tag": "md",
+                        "text": (
+                            'before <at user_id="ou_1">Alice</at>\n'
+                            "```python\n"
+                            "still no close fence ![pic](img_unclosed)\n"
+                            '<at user_id="ou_2">Bob</at>'
+                        ),
+                    }
+                ]
+            ],
+        }
+    }
+
+    t, r = flatten(PostContent(post=post))
+
+    assert "before @Alice" in t
+    assert "@Bob" in t
+    assert [(x.type, x.file_key) for x in r] == [
+        ("image", "img_unclosed"),
+    ]
+
+
+def test_post_md_text_multiple_paired_fences_protect_inner_blocks():
+    """Multiple complete fence pairs: only outside-of-fence transformations apply."""
+    post = {
+        "zh_cn": {
+            "content_v2": [
+                [
+                    {
+                        "tag": "md",
+                        "text": (
+                            "outer1 ![a](img_a)\n"
+                            "```\nblock1 <at user_id=\"x\">X</at>\n```\n"
+                            "outer2 ![b](img_b)\n"
+                            "```\nblock2 ![c](img_c)\n```\n"
+                            "outer3"
+                        ),
+                    }
+                ]
+            ],
+        }
+    }
+
+    t, r = flatten(PostContent(post=post))
+
+    # Inside-fence content preserved verbatim; outside-fence transformed.
+    assert 'block1 <at user_id="x">X</at>' in t
+    assert "block2 ![c](img_c)" in t
+    # Only outside-fence images extracted (img_a, img_b), inner img_c skipped.
+    assert [(x.type, x.file_key) for x in r] == [
+        ("image", "img_a"),
+        ("image", "img_b"),
+    ]
+
+
 def test_merge_forward_flatten_recursive():
     child = TextContent(text="child content")
     item = MergeForwardItem(
