@@ -1,6 +1,6 @@
 # Info
 PROJECT = "channel-sdk-python"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 # Domain
 FEISHU_DOMAIN = "https://open.feishu.cn"
