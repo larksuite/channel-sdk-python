@@ -41,7 +41,7 @@ FIXTURES = {
 
 def test_markdown_converter_has_tag_md_mode_field_with_structured_default():
     conv = MarkdownConverter()
-    assert conv.tag_md_mode == "structured"
+    assert conv.tag_md_mode == "native"
 
 
 def test_markdown_converter_accepts_native_tag_md_mode():
@@ -108,6 +108,10 @@ class TestSplitAtCodeFences:
 
 
 class TestNativeMode:
+    def test_default_mode_is_native(self):
+        out = markdown_to_post_ast("# Hello")
+        assert out["zh_cn"]["content"] == [[{"tag": "md", "text": "# Hello"}]]
+
     def test_plain_text_native_returns_single_md_node(self):
         out = markdown_to_post_ast("hello world", tag_md_mode="native")
         assert out == {
@@ -170,21 +174,21 @@ class TestStructuredSnapshot:
         path = Path(__file__).parent / "snapshots" / "markdown_structured.json"
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def test_structured_default_kwarg_equals_snapshot(self):
+    def test_structured_explicit_kwarg_equals_snapshot(self):
         snapshot = self._load_snapshot()
         for label, text in FIXTURES.items():
-            actual = markdown_to_post_ast(text)
+            actual = markdown_to_post_ast(text, tag_md_mode="structured")
             assert actual == snapshot[label], (
                 f"structured-mode regression for {label!r}\n"
                 f"expected: {json.dumps(snapshot[label], ensure_ascii=False)}\n"
                 f"actual:   {json.dumps(actual, ensure_ascii=False)}"
             )
 
-    def test_structured_explicit_kwarg_equals_default(self):
+    def test_native_default_matches_explicit_native(self):
         for label, text in FIXTURES.items():
             assert markdown_to_post_ast(text) == markdown_to_post_ast(
-                text, tag_md_mode="structured"
-            ), f"explicit and default disagree for {label!r}"
+                text, tag_md_mode="native"
+            ), f"native explicit and default disagree for {label!r}"
 
 
 class TestSenderBuildPost:
@@ -291,12 +295,12 @@ class TestSenderEndToEndNativeMode:
         from lark_channel.channel.types import OutboundPost
 
         d, calls = make_driver()
-        s = OutboundSender(d)  # default OutboundConfig: structured
+        s = OutboundSender(d)  # default OutboundConfig: native
         await s.send(OutboundPost(markdown="# Hello"), receive_id="oc_x")
         content = json.loads(calls[0]["content"])
         node = content["zh_cn"]["content"][0][0]
-        assert node["tag"] == "text"
-        assert "bold" in node.get("style", [])
+        assert node["tag"] == "md"
+        assert node["text"] == "# Hello"
 
     @pytest.mark.asyncio
     async def test_outbound_post_native_with_code_fence_produces_multi_row(self):

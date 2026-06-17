@@ -91,7 +91,7 @@ def markdown_to_post_ast(
     locale: str = "zh_cn",
     mentions: "list[Identity] | None" = None,
     table_mode: str = "off",
-    tag_md_mode: str = "structured",
+    tag_md_mode: str = "native",
 ) -> Dict[str, Any]:
     """Produce a Lark post AST (`{locale: {title, content: [[...]]}}`) from Markdown.
 
@@ -99,13 +99,14 @@ def markdown_to_post_ast(
     paragraph so the recipient actually gets notified.
 
     ``tag_md_mode``:
-        - ``"structured"`` (default): parse Markdown into explicit post nodes
+        - ``"native"`` (default): wrap the raw markdown into one or more
+          ``tag:md`` rows (split at code-fence boundaries) and let the Feishu
+          client's own markdown parser render natively. Renders headers /
+          blockquotes / lists with native styling, but rendering depends on
+          Feishu client version.
+        - ``"structured"``: parse Markdown into explicit post nodes
           (``tag:text`` with style attributes, ``tag:a`` for links,
           ``tag:code_block`` for fenced code, etc). Cross-client deterministic.
-        - ``"native"``: wrap the raw markdown into one or more ``tag:md`` rows
-          (split at code-fence boundaries) and let the Feishu client's own
-          markdown parser render natively. Renders headers/blockquotes/lists
-          with native styling, but rendering depends on Feishu client version.
     """
     if tag_md_mode == "native":
         return _build_native_md_ast(md, title=title, locale=locale, mentions=mentions)

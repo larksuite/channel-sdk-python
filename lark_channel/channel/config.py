@@ -243,7 +243,7 @@ class StreamThrottleConfig:
 class MarkdownConverter:
     enabled: bool = True
     table_mode: TableMode = "off"
-    tag_md_mode: TagMdMode = "structured"
+    tag_md_mode: TagMdMode = "native"
 
 
 @dataclass

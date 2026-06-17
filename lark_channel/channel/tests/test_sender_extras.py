@@ -58,7 +58,7 @@ async def test_table_mode_forwarded_to_markdown():
 
     s = OutboundSender(
         SendDriver(create_message=create_message, reply_message=noop),
-        OutboundConfig(markdown_converter=MarkdownConverter(table_mode="bullets")),
+        OutboundConfig(markdown_converter=MarkdownConverter(table_mode="bullets", tag_md_mode="structured")),
     )
     md = "| name | age |\n|---|---|\n| Alice | 30 |"
     await s.send(OutboundPost(markdown=md), receive_id="oc_1")

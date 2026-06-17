@@ -180,7 +180,8 @@ async def test_video_caption_native_post_body_uses_media_tag():
 @pytest.mark.asyncio
 async def test_image_caption_structured_adds_media_as_final_row():
     d, calls = make_caption_driver(image_key="img_structured")
-    s = OutboundSender(d)
+    cfg = OutboundConfig(markdown_converter=MarkdownConverter(tag_md_mode="structured"))
+    s = OutboundSender(d, cfg)
     await s.send(
         OutboundImage(source=MediaSource(kind="buffer", buffer=b"png"), caption="**bold**"),
         receive_id="oc_1",
