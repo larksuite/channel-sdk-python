@@ -19,7 +19,7 @@ def test_documented_primary_import_path_is_package_root():
     assert "pip install lark-channel-sdk" in text
     assert "docs/migration-from-lark-oapi.md" in text
     assert "docs/security.md" in text
-    assert "docs/release-notes/v1.0.0.md" in text
+    assert "docs/release-notes/v1.1.0.md" in text
     assert "pip install lark-oapi" not in text
     assert "lark-oapi[" not in text
     assert "from lark_channel.channel import" not in text
@@ -36,7 +36,7 @@ def test_security_and_migration_docs_are_linked_and_actionable():
 
     assert "docs/migration-from-lark-oapi.md" in readme
     assert "docs/security.md" in readme
-    assert "docs/release-notes/v1.0.0.md" in readme
+    assert "docs/release-notes/v1.1.0.md" in readme
     assert "from lark_channel import FeishuChannel" in migration
     assert "SecurityConfig(mode=\"audit\")" in migration
     assert "SecurityConfig(mode=\"audit\")" in security

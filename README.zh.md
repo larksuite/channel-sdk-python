@@ -46,7 +46,7 @@ asyncio.run(channel.connect())
 - [Webhook 服务适配](docs/webhook-server.md)
 - [CardKit 流式回复](docs/cardkit-streaming.md)
 - [去重架构](docs/dedup-architecture.md)
-- [发布说明](docs/release-notes/v1.0.0.md)
+- [发布说明](docs/release-notes/v1.1.0.md)
 - [Echo bot 示例](samples/channel/echo_bot.py)
 
 ## 从 `lark_oapi.channel` 迁移

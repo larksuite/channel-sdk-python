@@ -24,8 +24,8 @@ channel = FeishuChannel(
 
 | Mode | When to use | Rendering behavior |
 |---|---|---|
-| `structured` (default) | Deterministic rendering across clients, code blocks, links, and SDK-side wire-format assertions | Parses markdown into explicit post nodes such as `tag:text`, `tag:a`, and `tag:code_block`. Feishu post has no native heading, blockquote, or nested-list nodes, so those constructs are flattened or approximated. |
-| `native` | Richer user-facing markdown rendering in Feishu clients | Wraps markdown into `tag:md` nodes and lets the Feishu client render it. Headings, quotes, and lists render closer to native markdown, but exact output depends on client version. |
+| `native` (default) | Richer user-facing markdown rendering in Feishu clients | Wraps markdown into `tag:md` nodes and lets the Feishu client render it. Headings, quotes, and lists render closer to native markdown, but exact output depends on client version. |
+| `structured` | Deterministic rendering across clients, code blocks, links, and SDK-side wire-format assertions | Parses markdown into explicit post nodes such as `tag:text`, `tag:a`, and `tag:code_block`. Feishu post has no native heading, blockquote, or nested-list nodes, so those constructs are flattened or approximated. |
 
 `MarkdownConverter.enabled` exists for compatibility with the config schema. Do
 not rely on `enabled=False` to send plain text; use `{"text": ...}` instead.
