@@ -47,7 +47,7 @@ asyncio.run(channel.connect())
 - [Webhook server adapter](docs/webhook-server.md)
 - [CardKit streaming](docs/cardkit-streaming.md)
 - [Deduplication architecture](docs/dedup-architecture.md)
-- [Release notes](docs/release-notes/v1.0.0.md)
+- [Release notes](docs/release-notes/v1.1.0.md)
 - [Echo bot sample](samples/channel/echo_bot.py)
 
 ## Migration from `lark_oapi.channel`

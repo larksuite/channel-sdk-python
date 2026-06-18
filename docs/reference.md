@@ -387,4 +387,4 @@ Known `FeishuChannelErrorCode` values:
 - [Streaming with CardKit](./cardkit-streaming.md)
 - [Markdown to post conversion](./markdown.md)
 - [Two-layer dedup architecture](./dedup-architecture.md)
-- [Release notes](./release-notes/v1.0.0.md)
+- [Release notes](./release-notes/v1.1.0.md)
