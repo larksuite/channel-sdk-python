@@ -385,9 +385,11 @@ class OutboundSender:
         last_result: SendResult = SendResult.fail(SendError(code=FeishuChannelErrorCode.UNKNOWN, retryable=False))
         for idx, body in enumerate(body_list):
             req_uuid = uuid_ if (idx == 0 and uuid_) else str(uuid.uuid4())
-            # Only apply `reply_to` to the first chunk; subsequent chunks are
-            # fresh messages so they all render in the original chat.
-            effective_reply_to = reply_to if idx == 0 else None
+            # Apply `reply_to` to the first chunk, and to every chunk when threading.
+            # A fresh (non-reply) message renders in the origin chat for a normal reply,
+            # but in a THREAD/topic chat it drops out of the thread into the main chat —
+            # so later chunks must keep the reply to stay in the thread.
+            effective_reply_to = reply_to if (idx == 0 or reply_in_thread) else None
             result = await self._send_one_with_fallback(
                 body=body,
                 receive_id=receive_id,
