@@ -1,6 +1,7 @@
 """Safety pipeline — dedup, stale detection, policy, lock, batch+queue."""
 
 from .chat_pipeline import ChatPipeline, ChatPipelineManager, merge_batch
+from .loop_guard import LoopGuard
 from .pipeline import SafetyPipeline
 from .policy_gate import PolicyDecision, PolicyGate
 from .processing_lock import ProcessingLock
@@ -23,6 +24,7 @@ __all__ = [
     "ChatQueueConfig",
     "DEFAULT_STALE_MS",
     "DedupConfig",
+    "LoopGuard",
     "MediaBatchConfig",
     "PolicyDecision",
     "PolicyGate",

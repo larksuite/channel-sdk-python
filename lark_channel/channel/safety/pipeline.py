@@ -21,6 +21,7 @@ from lark_channel.core.log import logger
 from ..config import PolicyConfig
 from ..types import InboundMessage
 from .chat_pipeline import ChatPipelineManager
+from .loop_guard import LoopGuard
 from .media_pipeline import MediaPipelineManager
 from .policy_gate import PolicyGate
 from .processing_lock import ProcessingLock
@@ -73,7 +74,9 @@ class SafetyPipeline:
             sweep_seconds=dedup_config.sweep_seconds,
         )
         self._lock = ProcessingLock(ttl_ms=processing_lock_ttl_ms)
-        self._policy = PolicyGate(policy or PolicyConfig())
+        policy_obj = policy or PolicyConfig()
+        self._policy = PolicyGate(policy_obj)
+        self._loop_guard = LoopGuard(policy_obj.bot_loop_guard, logger)
         self._manager = ChatPipelineManager(
             config=batch_config or TextBatchConfig(),
             loop=loop,
@@ -164,6 +167,17 @@ class SafetyPipeline:
                 self._emit_reject(msg, decision.reason)
             else:
                 logger.debug("safety: policy drop message_id=%s reason=None", msg.id)
+            return
+
+        # 3.5 Bot ping-pong guard (opt-in). Runs after dedup + self_sent +
+        #     policy so a re-delivery can't inflate the count and a
+        #     policy-rejected message never counts; a human message (handled
+        #     inside record) resets the window.
+        if self._loop_guard.enabled and self._loop_guard.record(msg):
+            if self._loop_guard.on_trip == "reject":
+                self._emit_reject(msg, "bot_loop")
+            else:
+                logger.debug("safety: drop bot-loop message message_id=%s", msg.id)
             return
 
         # 4. Processing lock

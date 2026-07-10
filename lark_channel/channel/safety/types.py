@@ -39,6 +39,8 @@ RejectReason = Literal[
     "duplicate",
     "lock_contention",
     "self_sent",
+    # Opt-in bot ping-pong guard (PolicyConfig.bot_loop_guard, on_trip='reject').
+    "bot_loop",
     # Policy reasons (unified policy_ prefix)
     "policy_dm_disabled",
     "policy_group_disabled",

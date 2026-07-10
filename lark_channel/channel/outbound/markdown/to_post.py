@@ -14,6 +14,7 @@ import re
 from typing import Any, Dict, List, Tuple
 
 from ...types import Identity
+from .resolve_mentions import escape_at_name, is_valid_open_id
 
 # Inline marker patterns (order matters: most specific first).
 # Italic is tricky because `**bold**` also matches `*...*`. We require that
@@ -230,13 +231,13 @@ def markdown_to_post_ast(
     if mentions and paragraphs:
         at_runs: List[Dict[str, Any]] = []
         for ident in mentions:
-            if not ident or not ident.open_id:
+            if not ident or not is_valid_open_id(ident.open_id):
                 continue
             at_runs.append(
                 {
                     "tag": "at",
                     "user_id": ident.open_id,
-                    "user_name": ident.display_name or "",
+                    "user_name": escape_at_name(ident.display_name or ""),
                 }
             )
             at_runs.append({"tag": "text", "text": " "})
@@ -316,12 +317,12 @@ def _build_native_md_ast(
     if mentions and rows:
         at_runs: List[Dict[str, Any]] = []
         for ident in mentions:
-            if not ident or not ident.open_id:
+            if not ident or not is_valid_open_id(ident.open_id):
                 continue
             at_runs.append({
                 "tag": "at",
                 "user_id": ident.open_id,
-                "user_name": ident.display_name or "",
+                "user_name": escape_at_name(ident.display_name or ""),
             })
             at_runs.append({"tag": "text", "text": " "})
         rows[0] = at_runs + rows[0]

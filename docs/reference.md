@@ -150,6 +150,8 @@ Snake-case aliases such as `card_action`, `bot_added`, `bot_leave`, and
 | `sender` | `Identity` for the sender |
 | `sender_id` | Shortcut for `sender.open_id` |
 | `sender_name` | Optional display name |
+| `sender_type` | Raw sender kind (`user` / `bot` / `system` / `anonymous` / `app`), or `None` when the event omits it (see [Bot-at-bot](#bot-at-bot)) |
+| `sender_is_bot` | `True` when the sender is a bot/app (`sender.is_bot`) |
 | `mentions` | List of `Mention` objects |
 | `mentioned_all` | Whether the message mentioned all members |
 | `mentioned_bot` | Whether the message mentioned the bot |
@@ -377,6 +379,87 @@ Known `FeishuChannelErrorCode` values:
 | `send_timeout` | Send/connect timeout |
 | `not_connected` | Transport is not connected or startup failed |
 | `unknown` | Uncategorized upstream or SDK error |
+
+## Bot-at-bot
+
+Support for multiple bots collaborating in one chat — agents `@`-ing each other
+to hand off work. Everything here is **opt-in and additive**; default behavior
+is unchanged.
+
+**Know who sent it.** Every inbound message carries `sender_type`
+(`user` / `bot` / …) and the convenience `sender_is_bot`, so an agent can tell a
+human, itself, and another bot apart. Get the bot's own identity for its system
+prompt with `channel.get_bot_identity()` → `BotIdentity(open_id, name, …)`
+(raises `FeishuChannelError(code=not_connected)` before `connect()`). Set
+`resolve_sender_names=True` to fill `sender_name` from the chat roster.
+
+**Receiving events from other bots.** Feishu does **not** deliver "another bot
+`@`-ed me" events unless the app has the `im:message.group_at_msg` /
+`include_bot` permission enabled — and the failure is silent. There is no API to
+self-check this; if bot-to-bot mentions never arrive, verify that permission
+first. An `@`-only ping (no body) still wakes the bot: `mentioned_bot` is `True`
+while `content_text` is empty. Detect it with
+`msg.mentioned_bot and not msg.content_text.strip()`.
+
+**Roster.**
+
+| Method | Return | Notes |
+|---|---|---|
+| `await channel.get_chat_members(chat_id, *, page_size=100, max_pages=10, id_type="open_id", force=False)` | `list[ChatMember]` | A chat's **users** (Feishu filters bots out, so `is_bot` is never `True`); paginated + cached. `force` refetches |
+| `await channel.get_chat_bots(chat_id, *, force=False)` | `list[ChatMember]` | The chat's **bots** (`is_bot=True`); cached; seeds the roster so a bot is `@`-able by name without first appearing in a mention |
+| `channel.get_bot_identity()` | `BotIdentity` | This bot's own identity; raises `not_connected` before `connect()` |
+
+`ChatMember` = `id`, `id_type`, `name`, `tenant_key`, `is_bot`. Provide a
+`resolve_chat_members` config hook (`(chat_id) -> list[ChatMember] | None`, sync
+or async) to source the roster from your own directory instead of the API
+(return `None` to fall back to the API).
+
+**Replying to the right place.** `await channel.reply(msg, message, opts=None)`
+replies to `msg` and follows its shape: `reply_to` defaults to `msg.message_id`
+and `reply_in_thread` defaults to whether the trigger was in a topic thread, so
+a reply stays in a thread when the message was in one and stays flat when it
+wasn't. `opts` overrides either default; `reply()` never promotes a flat message
+into a thread on its own.
+
+**`@`-mentioning by name.** Either pass structured mentions — a name-only
+`Identity(open_id="", display_name="Alice")` on `OutboundText` / `OutboundPost`
+is resolved to an open_id against the chat roster (dropped if it doesn't
+resolve) — or set `SendOpts.resolve_mentions_in_text=True` to rewrite `@name`
+tokens in a text / markdown body. A name that is unknown **or shared by more
+than one member** is left as plain text and never mis-mentioned; for
+security-sensitive handoffs, pass an explicit open_id. Roster names come from
+`get_chat_members` (users), `get_chat_bots` (bots), and bots observed in earlier
+inbound mentions.
+
+**Restrict who can trigger the bot — by chat, not by sender.** Sender open_ids
+are hard to get up front, so enumerating them in `allow_from` is impractical.
+Instead allow only specific chats with `group_allowlist=['oc_…']` and require an
+`@` with `require_mention=True`. `allow_from` takes **sender ids**
+(`ou_…` / user_id / union_id); `group_allowlist` takes **chat ids** (`oc_…`); an
+app id (`cli_…`) belongs in neither and logs a warning.
+
+**Breaking ping-pong loops.** The opt-in `policy.bot_loop_guard` counts only
+"another bot `@`-ed me" messages in a sliding window (a human message resets it)
+and trips past a threshold:
+
+```python
+from lark_channel import BotLoopGuardConfig, PolicyConfig
+
+policy = PolicyConfig(
+    bot_loop_guard=BotLoopGuardConfig(
+        enabled=True,
+        window_ms=60_000,       # sliding window W
+        max_bot_mentions=5,     # trip at N bot @-mentions in W
+        scope="chat",           # or "chat+sender"
+        on_trip="reject",       # "drop" (default) silently mutes; "reject" emits reject(reason="bot_loop")
+    )
+)
+```
+
+The default `on_trip="drop"` silently stops replying (one warning on the first
+trip); prefer `"reject"` (emits a `reject` event with `reason="bot_loop"`) when
+the app needs to know. This is a heuristic backstop, not a protocol-level
+guarantee.
 
 ## Related Documents
 

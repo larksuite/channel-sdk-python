@@ -38,13 +38,19 @@ import json
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Set, Union
 
 from lark_channel.client import Client
-from lark_channel.core.enum import LogLevel
+from lark_channel.core.enum import AccessTokenType, HttpMethod, LogLevel
+from lark_channel.core.http import Transport
 from lark_channel.core.log import logger
+from lark_channel.core.model import BaseRequest, RequestOption
+# Imported as a module (not ``from …auth import verify``) so the tenant-token
+# injection is reached via ``_token_auth.verify`` — tests patch it at its source
+# (``lark_channel.core.token.auth.verify``), which a local alias would bypass.
+from lark_channel.core.token import auth as _token_auth
 from lark_channel.event.callback.model.p2_card_action_trigger import (
     P2CardActionTrigger,
     P2CardActionTriggerResponse,
@@ -60,6 +66,7 @@ from lark_channel.core.cache import ICache
 from .auth.token_store import InMemoryTokenStore, TokenStore
 from .auth.uat_runner import require_user_auth
 from .bot_identity import BotIdentity, fetch_bot_identity
+from .chat_member_cache import ChatMemberCache
 from .chat_mode import ChatModeCache
 from .comment import CommentPrimitiveClient
 from .config import (
@@ -73,13 +80,23 @@ from .config import (
     UATConfig,
 )
 from .driver import LarkClientDriver
-from .errors import FeishuChannelError, FeishuChannelErrorCode, OutboundSendError, SendError
+from .errors import (
+    FeishuChannelError,
+    FeishuChannelErrorCode,
+    OutboundSendError,
+    SendError,
+    classify_api_error,
+)
 from .identity import IdentityResolver, NameCache
 from .keepalive import KeepaliveWatchdog
 from .media_cache import MediaResourceCache
 from .normalize.comment import normalize_comment
 from .normalize.dedup import Deduper, InMemoryDedupStore
 from .normalize.pipeline import InboundPipeline, PipelineConfig, PipelineDeps
+from .outbound.markdown.resolve_mentions import (
+    resolve_mentions_in_text,
+    resolve_name_mentions,
+)
 from .outbound.routing import infer_receive_id_type
 from .outbound.sender import OutboundSender
 from .outbound.streaming.card_stream import CardStreamController
@@ -94,6 +111,7 @@ from .types import (
     CardActionEvent,
     CardActionPayload,
     ChatInfo,
+    ChatMember,
     CommentContext,
     CommentTarget,
     ConnectionSnapshot,
@@ -400,6 +418,10 @@ class FeishuChannel:
             cache=NameCache(cfg.inbound.name_cache),
         )
         self._chat_mode_cache = ChatModeCache(cfg.chat_mode_cache)
+        # Per-chat roster (users + bots + observed mentions), shared by
+        # get_chat_members/get_chat_bots, sender_name resolution and the
+        # outbound "@name → open_id" normalization.
+        self._chat_member_cache = ChatMemberCache()
         self._media_cache = MediaResourceCache(cfg.media_cache)
 
         self._token_store: TokenStore = token_store or InMemoryTokenStore()
@@ -571,6 +593,25 @@ class FeishuChannel:
         """
         with self._bot_identity_lock:
             return self._bot_identity
+
+    def get_bot_identity(self) -> BotIdentity:
+        """This bot's own identity (:class:`BotIdentity`) — e.g. to inline into
+        an agent's system prompt so it can tell itself apart from other bots and
+        decide whom to reply to.
+
+        Resolved during :meth:`connect`. Raises
+        :class:`FeishuChannelError` with code ``not_connected`` if called before
+        the identity is available, rather than returning ``None``, so callers
+        don't silently build a prompt with a missing identity. Use the
+        :attr:`bot_identity` property when a ``None`` sentinel is preferred.
+        """
+        identity = self.bot_identity
+        if identity is None:
+            raise FeishuChannelError(
+                FeishuChannelErrorCode.NOT_CONNECTED,
+                "bot identity not resolved yet — call connect() first",
+            )
+        return identity
 
     @property
     def config(self) -> ChannelConfig:
@@ -1451,12 +1492,51 @@ class FeishuChannel:
             )
             if inbound is None:
                 return
+            # Seed the roster from observed mentions (incl. bots, which the
+            # members API filters out) so a bot that has "shown its face" can
+            # later be @'d by name. Best-effort; source 'mention' never
+            # overwrites authoritative 'api' names.
+            self._collect_mentions_into_roster(inbound)
+            # Opt-in: fill sender_name from the chat roster (warmed via a cached
+            # get_chat_members). Off by default → no extra roster API call.
+            if self._config.resolve_sender_names:
+                await self._resolve_sender_name_from_roster(inbound)
             if self._safety is not None:
                 await self._safety.push_message(inbound)
             else:
                 await self._dispatch_inbound_to_user(inbound)
         except Exception as e:
             logger.exception("FeishuChannel.handle_message_event failed: %s", e)
+
+    def _collect_mentions_into_roster(self, inbound) -> None:
+        chat_id = inbound.conversation.chat_id if inbound.conversation else None
+        if not chat_id:
+            return
+        seen = [
+            ChatMember(id=m.open_id, name=m.name, is_bot=m.is_bot)
+            for m in inbound.mentions
+            if m.open_id and m.name
+        ]
+        if seen:
+            self._chat_member_cache.set_members(chat_id, seen, "mention")
+
+    async def _resolve_sender_name_from_roster(self, inbound) -> None:
+        """Warm the chat roster and fill ``sender.display_name`` from it when the
+        pipeline's own name resolution didn't. Best-effort — a roster miss or API
+        failure degrades to leaving the name unset, never raises into dispatch."""
+        chat_id = inbound.conversation.chat_id if inbound.conversation else None
+        open_id = inbound.sender.open_id if inbound.sender else None
+        if not chat_id or not open_id:
+            return
+        try:
+            await self.get_chat_members(chat_id)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("channel: sender-name roster warm failed: %s", e)
+            return
+        if not inbound.sender.display_name:
+            name = self._chat_member_cache.resolve_name(chat_id, open_id)
+            if name:
+                inbound.sender.display_name = name
 
     async def _dispatch_inbound_to_user(self, inbound) -> None:
         await self._invoke("message", inbound)
@@ -1835,6 +1915,7 @@ class FeishuChannel:
             outbound = _coerce.coerce_outbound(message)
             send_opts = _coerce.coerce_send_opts(opts)
             rit = send_opts.receive_id_type or infer_receive_id_type(to)
+            outbound = self._resolve_outbound_mentions(to, outbound, send_opts)
             result = await self._sender.send(
                 outbound,
                 receive_id=to,
@@ -1856,6 +1937,57 @@ class FeishuChannel:
                 receive_id_type=rit,
             )
         return result
+
+    def _resolve_outbound_mentions(self, to, outbound, opts):
+        """Resolve "@name" into real mentions against the target chat's roster
+        before sending: fill open_id on name-only structured mentions, and — when
+        ``opts.resolve_mentions_in_text`` — rewrite ``@name`` tokens in a
+        text / markdown body. Both no-op when there's nothing to resolve (or when
+        ``to`` isn't a chat with a roster), so the default send path is untouched.
+        """
+        def lookup(name: str) -> Optional[str]:
+            return self._chat_member_cache.resolve_open_id(to, name)
+
+        if isinstance(outbound, (OutboundText, OutboundPost)) and outbound.mentions:
+            outbound = replace(
+                outbound, mentions=resolve_name_mentions(outbound.mentions, lookup)
+            )
+
+        if opts.resolve_mentions_in_text:
+            if isinstance(outbound, OutboundText) and outbound.text:
+                outbound = replace(
+                    outbound, text=resolve_mentions_in_text(outbound.text, lookup)
+                )
+            elif isinstance(outbound, OutboundPost) and outbound.markdown:
+                outbound = replace(
+                    outbound, markdown=resolve_mentions_in_text(outbound.markdown, lookup)
+                )
+
+        return outbound
+
+    async def reply(self, msg, message, opts=None) -> SendResult:
+        """Reply to a received message, following the triggering message's shape.
+
+        Defaults ``reply_to`` to ``msg.message_id`` and — when the trigger was
+        inside a topic thread (``msg.conversation.thread_id`` present) — defaults
+        ``reply_in_thread`` to ``True`` so the reply lands back in that thread.
+        A flat message stays flat: ``reply`` only *follows* the trigger, it never
+        promotes a flat message into a thread. ``opts`` overrides either default.
+        Semantically a :meth:`send`.
+        """
+        base = _coerce.coerce_send_opts(opts)
+        conversation = getattr(msg, "conversation", None)
+        thread_id = getattr(conversation, "thread_id", None)
+        resolved = replace(
+            base,
+            reply_to=base.reply_to or msg.message_id,
+            reply_in_thread=(
+                base.reply_in_thread
+                if base.reply_in_thread is not None
+                else bool(thread_id)
+            ),
+        )
+        return await self.send(msg.chat_id, message, resolved)
 
     async def _forward_outbound_error(self, err: Any) -> None:
         """Fan-out a send/stream failure to any ``on("error", ...)`` handlers.
@@ -2312,6 +2444,174 @@ class FeishuChannel:
             self._chat_mode_cache.set(chat_id, mode)
             return mode
         return self._config.chat_mode_cache.fallback
+
+    # ------------------------------------------------------------------
+    # Chat roster (bot-at-bot)
+    # ------------------------------------------------------------------
+    async def get_chat_members(
+        self,
+        chat_id: str,
+        *,
+        page_size: int = 100,
+        max_pages: int = 10,
+        id_type: str = "open_id",
+        force: bool = False,
+    ) -> List[ChatMember]:
+        """List a chat's members, following pagination.
+
+        Returns **users only** — Feishu's chat-members API filters bots out, so
+        ``is_bot`` is never ``True`` here; use :meth:`get_chat_bots` for the
+        bots. ``page_size`` is clamped to Feishu's max of 100; ``max_pages``
+        (default 10) caps paging. Results are cached per chat and reused by
+        ``sender_name`` resolution and "@name → open_id"; a second call hits the
+        cache and ``force`` bypasses it. A ``resolve_chat_members`` config hook,
+        if provided, overrides the API. Raises :class:`FeishuChannelError` on
+        API failure.
+        """
+        if not force:
+            cached = self._chat_member_cache.get_members(chat_id)
+            if cached is not None:
+                return cached
+        members = await self._fetch_chat_members(
+            chat_id, page_size=page_size, max_pages=max_pages, id_type=id_type
+        )
+        self._chat_member_cache.set_members(chat_id, members, "api")
+        return members
+
+    async def _fetch_chat_members(
+        self, chat_id: str, *, page_size: int, max_pages: int, id_type: str
+    ) -> List[ChatMember]:
+        hook = self._config.resolve_chat_members
+        if hook is not None:
+            result = hook(chat_id)
+            if inspect.isawaitable(result):
+                result = await result
+            # A non-empty roster from the hook wins; ``None`` or an empty list
+            # both mean "no data from the hook" and fall back to the API.
+            if result:
+                return list(result)
+
+        size = min(max(page_size, 1), 100)
+        out: List[ChatMember] = []
+        page_token: Optional[str] = None
+        for _ in range(max_pages):
+            queries: List[tuple] = [
+                ("member_id_type", id_type),
+                ("page_size", str(size)),
+            ]
+            if page_token:
+                queries.append(("page_token", page_token))
+            data = await self._raw_tenant_get(
+                "/open-apis/im/v1/chats/:chat_id/members",
+                {"chat_id": chat_id},
+                queries,
+            )
+            for it in data.get("items") or []:
+                member_id = it.get("member_id") or it.get("open_id")
+                if not member_id:
+                    continue
+                out.append(
+                    ChatMember(
+                        id=member_id,
+                        id_type=it.get("member_id_type") or id_type,
+                        name=it.get("name"),
+                        tenant_key=it.get("tenant_key"),
+                        is_bot=False,
+                    )
+                )
+            if not data.get("has_more") or not data.get("page_token"):
+                break
+            page_token = data.get("page_token")
+        return out
+
+    async def get_chat_bots(
+        self, chat_id: str, *, force: bool = False
+    ) -> List[ChatMember]:
+        """List the **bots** in a chat — the companion to :meth:`get_chat_members`,
+        which returns users only. Returns :class:`ChatMember`\\ s with
+        ``is_bot=True`` and seeds them into the roster so another bot can be
+        ``@``-ed by name without having appeared in an inbound mention first.
+        Cached per chat like ``get_chat_members`` (``force`` bypasses). Raises
+        :class:`FeishuChannelError` on API failure.
+        """
+        if not force:
+            cached = self._chat_member_cache.get_bots(chat_id)
+            if cached is not None:
+                return cached
+        bots = await self._fetch_chat_bots(chat_id)
+        self._chat_member_cache.set_bots(chat_id, bots)
+        return bots
+
+    async def _fetch_chat_bots(self, chat_id: str) -> List[ChatMember]:
+        data = await self._raw_tenant_get(
+            "/open-apis/im/v1/chats/:chat_id/members/bots",
+            {"chat_id": chat_id},
+            [],
+        )
+        out: List[ChatMember] = []
+        for it in data.get("items") or []:
+            bot_id = it.get("bot_id")
+            if not bot_id:
+                continue
+            out.append(
+                ChatMember(
+                    id=bot_id,
+                    id_type="open_id",
+                    name=it.get("bot_name"),
+                    is_bot=True,
+                )
+            )
+        return out
+
+    async def _raw_tenant_get(
+        self, uri: str, paths: Dict[str, str], queries: List[tuple]
+    ) -> Dict[str, Any]:
+        """GET a tenant-scoped endpoint that has no generated SDK resource
+        (mirrors :mod:`.bot_identity`). ``chat_id`` and other caller-supplied
+        values go through ``req.paths`` so ``Transport._build_url`` URL-encodes
+        them — never f-stringed raw into the URI (path-traversal guard).
+        """
+        req = BaseRequest()
+        req.http_method = HttpMethod.GET
+        req.uri = uri
+        req.paths = dict(paths)
+        req.queries = list(queries)
+        req.token_types = {AccessTokenType.TENANT}
+        option = RequestOption()
+        # Raw Transport bypasses the Chain that normally injects the tenant
+        # token; call verify explicitly (see bot_identity for the same pattern).
+        _token_auth.verify(self._client.config, req, option)
+        try:
+            resp = await Transport.aexecute(self._client.config, req, option)
+        except Exception as e:
+            raise FeishuChannelError(
+                FeishuChannelErrorCode.UNKNOWN,
+                f"chat roster request failed: {e}",
+                cause=e,
+            ) from e
+        return self._parse_tenant_body(resp)
+
+    @staticmethod
+    def _parse_tenant_body(resp: Any) -> Dict[str, Any]:
+        if resp is None or getattr(resp, "content", None) is None:
+            raise FeishuChannelError(
+                FeishuChannelErrorCode.UNKNOWN, "empty roster response"
+            )
+        try:
+            body = json.loads(resp.content.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as e:
+            raise FeishuChannelError(
+                FeishuChannelErrorCode.UNKNOWN, "malformed roster response", cause=e
+            ) from e
+        code = body.get("code")
+        if code:
+            raise FeishuChannelError(
+                classify_api_error(code, body.get("msg") or ""),
+                body.get("msg") or f"roster request returned code {code}",
+                context={"code": code},
+            )
+        data = body.get("data")
+        return data if isinstance(data, dict) else {}
 
     # ------------------------------------------------------------------
     # CardKit preallocation API

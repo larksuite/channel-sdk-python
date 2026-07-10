@@ -133,7 +133,11 @@ def test_channel_config_keeps_existing_positional_arguments_stable():
     signature = inspect.signature(ChannelConfig)
     params = list(signature.parameters)
 
-    assert params[-1] == "security"
+    # The bot-at-bot knobs are appended AFTER `security`, so the original
+    # positional prefix (through `security`, adjacent to `media_cache`) is
+    # unchanged and existing positional callers still map correctly.
+    assert params.index("security") == params.index("media_cache") + 1
+    assert params[-2:] == ["resolve_sender_names", "resolve_chat_members"]
     assert params.index("security") > params.index("media_cache")
 
     config = ChannelConfig(
@@ -168,6 +172,9 @@ def test_channel_config_field_order_is_stable_for_positional_callers():
         "http_executor",
         "media_cache",
         "security",
+        # Bot-at-bot knobs, appended at the end (positional-compat preserving).
+        "resolve_sender_names",
+        "resolve_chat_members",
     ]
 
 

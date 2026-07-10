@@ -183,7 +183,10 @@ def resolve_mentions(
     # user-visible content carries the raw token.
     result = _AT_ALL_RE.sub(MENTION_ALL_DISPLAY, result)
     if strip_bot_mentions:
-        result = re.sub(r"\s{2,}", " ", result).strip()
+        # Collapse the whitespace left where a bot mention was removed, then
+        # trim ends. Only horizontal whitespace is collapsed — newlines are
+        # preserved so a multi-line body that @-ed the bot keeps its structure.
+        result = re.sub(r"[^\S\n]{2,}", " ", result).strip()
     return result
 
 

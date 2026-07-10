@@ -213,7 +213,11 @@ async def test_mentions_resolved_and_stripped():
 
 
 @pytest.mark.asyncio
-async def test_pipeline_sets_mentioned_bot_without_removing_bot_mention():
+async def test_pipeline_sets_mentioned_bot_and_strips_bot_mention_from_content():
+    # Bot-at-bot: the bot's own @-mention is stripped from the
+    # rendered content (so a bare "@bot" wake normalizes to empty and the
+    # `mentioned_bot and not content_text.strip()` ping heuristic works), while
+    # `mentioned_bot` stays True and the bot remains in `mentions`.
     msg = _msg(
         chat_type="group",
         content={"text": "hey @_user_1"},
@@ -229,7 +233,7 @@ async def test_pipeline_sets_mentioned_bot_without_removing_bot_mention():
     assert inbound is not None
     assert inbound.mentioned_bot is True
     assert [m.open_id for m in inbound.mentions] == ["ou_bot"]
-    assert inbound.content.text == "hey @Bot"
+    assert inbound.content.text == "hey"
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,7 @@ from ..errors import (
     is_reply_target_gone,
 )
 from .retry import with_retry
+from .markdown.resolve_mentions import escape_at_name, is_valid_open_id
 from .media.uploader import resolve_media_key
 from ..types import (
     OutboundAudio,
@@ -182,11 +183,13 @@ def _extract_message_id(resp: Dict[str, Any]) -> Optional[str]:
 
 
 def _build_text(msg: OutboundText) -> Dict[str, str]:
-    # Inject <at> tags for mentioned identities so they get notified.
+    # Inject <at> tags for mentioned identities so they get notified. A display
+    # name is attacker-influenced, so it flows through escape_at_name, and only
+    # well-formed open_ids reach the sink (see resolve_mentions).
     at_prefix = ""
     for ident in msg.mentions or []:
-        if ident and ident.open_id:
-            name = ident.display_name or ""
+        if ident and is_valid_open_id(ident.open_id):
+            name = escape_at_name(ident.display_name or "")
             at_prefix += f'<at user_id="{ident.open_id}">{name}</at> '
     content = at_prefix + (msg.text or "")
     return {"msg_type": "text", "content": json.dumps({"text": content}, ensure_ascii=False)}

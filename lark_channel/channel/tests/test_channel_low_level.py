@@ -137,7 +137,9 @@ async def test_fetch_inbound_message_returns_normalized_message_without_changing
 
     assert inbound is not None
     assert inbound.id == "om_1"
-    assert inbound.content_text == "hello @Bot"
+    # The bot's own @-mention is stripped from rendered content (bot-at-bot);
+    # the body survives and mentioned_bot stays True.
+    assert inbound.content_text == "hello"
     assert inbound.mentioned_bot is True
     assert inbound.raw["message_id"] == "om_1"
 

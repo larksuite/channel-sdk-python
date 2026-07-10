@@ -108,6 +108,26 @@ class GroupOverride:
 
 
 @dataclass
+class BotLoopGuardConfig:
+    """Opt-in heuristic guard against two bots ``@``-ing each other in an
+    endless ping-pong. Off by default.
+
+    Only "another bot @'d me" messages count; a human message resets the count.
+    When the count reaches ``max_bot_mentions`` inside the ``window_ms`` sliding
+    window the guard trips. The default ``on_trip='drop'`` **silently** stops
+    replying (one warn on the first trip); prefer ``'reject'`` (emits a
+    ``reject`` event with ``reason='bot_loop'``) when the app needs to know.
+    A heuristic backstop, not a protocol-level guarantee.
+    """
+
+    enabled: bool = False
+    window_ms: int = 60000
+    max_bot_mentions: int = 5
+    scope: Literal["chat", "chat+sender"] = "chat"
+    on_trip: Literal["drop", "reject"] = "drop"
+
+
+@dataclass
 class PolicyConfig:
     """Admission / routing policy for inbound messages.
 
@@ -122,7 +142,12 @@ class PolicyConfig:
       under DM ``allowlist``/``blocklist`` modes, matched by
       ``sender_identity_fields``
     - ``group_allowlist`` / ``group_blocklist`` — chat_ids allowed/denied
-      under group ``allowlist``/``blocklist`` modes
+      under group ``allowlist``/``blocklist`` modes. ``group_allowlist`` takes
+      **chat ids** (``oc_…``); paired with ``require_mention`` it scopes the bot
+      to specific rooms without enumerating every sender — a lightweight
+      "allowFrom" for bot-at-bot. ``allow_from`` takes **sender ids** (``ou_…``
+      / user_id / union_id). An app id (``cli_…``) belongs in neither list and
+      matches nothing (the SDK logs a warning if it sees one)
     - ``admins`` — sender identities that bypass every gate (always allowed;
       required sender list for ``admin_only`` group policy), matched by
       ``sender_identity_fields``
@@ -144,6 +169,7 @@ class PolicyConfig:
         default_factory=lambda: ["open_id"]
     )
     group_overrides: Dict[str, GroupOverride] = field(default_factory=dict)
+    bot_loop_guard: Optional[BotLoopGuardConfig] = None
 
 
 # ---------------------------------------------------------------------------
@@ -495,3 +521,19 @@ class ChannelConfig:
     http_executor: Optional[Callable] = None
     media_cache: MediaCacheConfig = field(default_factory=MediaCacheConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
+
+    # Bot-at-bot knobs. Appended at the end so existing positional field order
+    # (guarded by test_security_config) stays stable for positional callers.
+    #
+    # ``resolve_sender_names``: populate ``InboundMessage.sender_name`` by
+    # resolving the sender's display name from the chat's member roster (warmed
+    # via a cached ``get_chat_members``). Off by default → no extra roster API.
+    resolve_sender_names: bool = False
+    # ``resolve_chat_members``: override how ``get_chat_members`` sources a chat's
+    # roster. When provided and it returns a member list, that list is used and
+    # the Feishu API call is skipped; return ``None`` to fall back to the API.
+    # The callable takes a ``chat_id`` and may be sync or async; results still
+    # flow through the internal roster cache. (Typed ``Any`` to avoid importing
+    # ``ChatMember`` from ``types`` — that would create an import cycle back
+    # through this module.)
+    resolve_chat_members: Optional[Callable[[str], Any]] = None

@@ -16,7 +16,9 @@ Returns `(allowed: bool, reason?: RejectReason)`.
 
 import threading
 from dataclasses import dataclass
-from typing import List, Optional, Set
+from typing import List, Optional, Sequence, Set
+
+from lark_channel.core.log import logger
 
 from ..config import PolicyConfig
 from ..types import Identity, InboundMessage
@@ -52,6 +54,7 @@ class PolicyGate:
         self._policy = policy or PolicyConfig()
         self._bot_open_id: Optional[str] = None
         self._lock = threading.Lock()
+        self._warn_on_misconfigured_allowlists()
 
     def set_bot_open_id(self, open_id: Optional[str]) -> None:
         with self._lock:
@@ -67,6 +70,38 @@ class PolicyGate:
             for k, v in changes.items():
                 if hasattr(self._policy, k):
                     setattr(self._policy, k, v)
+        self._warn_on_misconfigured_allowlists()
+
+    def _warn_on_misconfigured_allowlists(self) -> None:
+        """Flag the most common allowlist misconfiguration: an app id (``cli_…``)
+        in a list that expects sender ids / chat ids, which silently matches
+        nothing. Logs only the field name and the single offending value — never
+        the whole list (no PII / full-table dumps)."""
+        self._warn_on_cli_entry(
+            "allow_from", "sender ids (ou_/user_id/union_id)", self._policy.allow_from
+        )
+        self._warn_on_cli_entry(
+            "group_allowlist", "chat ids (oc_)", self._policy.group_allowlist
+        )
+
+    @staticmethod
+    def _warn_on_cli_entry(
+        field: str, accepts: str, values: Optional[Sequence[str]]
+    ) -> None:
+        if not values:
+            return
+        offending = next(
+            (v for v in values if isinstance(v, str) and v.startswith("cli_")), None
+        )
+        if offending is None:
+            return
+        logger.warning(
+            "channel: PolicyConfig.%s contains an app id (%r) — it accepts %s, "
+            "not cli_; this entry matches nothing",
+            field,
+            offending,
+            accepts,
+        )
 
     def evaluate(self, msg: InboundMessage) -> PolicyDecision:
         with self._lock:
