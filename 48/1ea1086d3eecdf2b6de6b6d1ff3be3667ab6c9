@@ -1,0 +1,83 @@
+README.md
+  s_4207aa778ab373::t_a8aa2322233c63 44
+README.zh.md
+  s_4207aa778ab373::t_b9a31dd5df77a4 43
+docs/reference.md
+  s_4207aa778ab373::t_62e0c189b2b29c 153-154,383-463
+lark_channel/channel/__init__.py
+  s_4207aa778ab373::t_08bcc498cc9b3f 33,119,183,281
+lark_channel/channel/chat_member_cache.py
+  s_4207aa778ab373::t_c8893767acc927 1-200
+lark_channel/channel/config.py
+  s_4207aa778ab373::t_bf3e913576aa33 110-129,145-150,172,524-539
+lark_channel/channel/normalize/pipeline.py
+  s_4207aa778ab373::t_d2bd555eb37e9a 71,76-77,80,85-86
+lark_channel/channel/outbound/markdown/resolve_mentions.py
+  s_4207aa778ab373::t_844db3cedd7906 1-158
+lark_channel/channel/outbound/markdown/to_post.py
+  s_4207aa778ab373::t_6a51a2985fc8a2 17,234,240,320,325
+lark_channel/channel/outbound/sender.py
+  s_4207aa778ab373::t_04d39220996a21 29,186-188,191-192
+lark_channel/channel/safety/__init__.py
+  s_4207aa778ab373::t_10ed725b164acd 4,27
+lark_channel/channel/safety/loop_guard.py
+  s_4207aa778ab373::t_97250b3c6dcb73 1-97
+lark_channel/channel/safety/pipeline.py
+  s_4207aa778ab373::t_1f3d178a7ffc75 24,77-79,172-182
+lark_channel/channel/safety/policy_gate.py
+  s_4207aa778ab373::t_c4836f72e627be 19-21,57,73-104
+lark_channel/channel/safety/types.py
+  s_4207aa778ab373::t_9ab7ebd3641606 42-43
+lark_channel/channel/tests/test_chat_bots.py
+  s_4207aa778ab373::t_5ebe841343ff40 1-116
+lark_channel/channel/tests/test_chat_member_cache.py
+  s_c27c7ea35a5a29::t_7cb978c6eec7c3 1-84
+lark_channel/channel/tests/test_compose_mentions_escaping.py
+  s_4207aa778ab373::t_9a190b4360a76a 1-69
+lark_channel/channel/tests/test_empty_at_wake.py
+  s_c27c7ea35a5a29::t_ad83787f9abc5d 1-38
+lark_channel/channel/tests/test_get_bot_identity.py
+  s_c27c7ea35a5a29::t_1f9163f1c9d47a 1-38
+lark_channel/channel/tests/test_loop_guard.py
+  s_c27c7ea35a5a29::t_7b34b2fceee9f2 1-160
+lark_channel/channel/tests/test_policy_allowlist_warn.py
+  s_c27c7ea35a5a29::t_630a204ff4277e 1-61
+lark_channel/channel/tests/test_reject_reasons.py
+  s_4207aa778ab373::t_99396d5fe2ab67 18
+lark_channel/channel/tests/test_reply.py
+  s_c27c7ea35a5a29::t_4187f3621ca8e4 1-58
+lark_channel/channel/tests/test_resolve_mentions.py
+  s_c27c7ea35a5a29::t_71a4111477a8eb 1-101
+lark_channel/channel/tests/test_security_config.py
+  s_4207aa778ab373::t_b7f2052a00b6bb 136-140,175-177
+lark_channel/channel/tests/test_sender_name_resolution.py
+  s_c27c7ea35a5a29::t_6d634e5c4b599d 1-36
+lark_channel/channel/types.py
+  s_4207aa778ab373::t_ddb6c00689d3e4 34-39,59-76,482-494,717-721
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "481ea1086d3eecdf2b6de6b6d1ff3be3667ab6c9",
+  "prompts": {},
+  "sessions": {
+    "s_4207aa778ab373": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "430df44d-0a48-4dcf-9d44-d80c052f30a1",
+        "model": "unknown"
+      },
+      "human_author": "mazhe.nerd <mazhe.nerd@bytedance.com>"
+    },
+    "s_c27c7ea35a5a29": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-ac42bfb8f786de8a0",
+        "model": "unknown"
+      },
+      "human_author": "mazhe.nerd <mazhe.nerd@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
