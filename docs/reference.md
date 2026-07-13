@@ -157,8 +157,9 @@ Snake-case aliases such as `card_action`, `bot_added`, `bot_leave`, and
 | `mentioned_bot` | Whether the message mentioned the bot |
 | `reply_to_message_id` | Parent message id when present |
 | `content` | Typed `MessageContent` dataclass |
-| `content_text` | Flattened markdown/XML-style text |
+| `content_text` | Flattened markdown/XML-style text (unchanged — keeps rendered mentions, incl. the bot's own) |
 | `safe_content_text` | Escaped flattened text for security-sensitive rendering |
+| `body_text` | `content_text` with the current bot's own `@`-mention removed — for command parsing / bare-`@` wake detection; equals `content_text` when the bot isn't mentioned (see [Bot-at-bot](#bot-at-bot)) |
 | `resources` | Resource descriptors for download |
 | `raw_content_type` | Original Feishu message type |
 | `raw` | Original event payload |
@@ -394,12 +395,15 @@ prompt with `channel.get_bot_identity()` → `BotIdentity(open_id, name, …)`
 `resolve_sender_names=True` to fill `sender_name` from the chat roster.
 
 **Receiving events from other bots.** Feishu does **not** deliver "another bot
-`@`-ed me" events unless the app has the `im:message.group_at_msg` /
-`include_bot` permission enabled — and the failure is silent. There is no API to
-self-check this; if bot-to-bot mentions never arrive, verify that permission
-first. An `@`-only ping (no body) still wakes the bot: `mentioned_bot` is `True`
-while `content_text` is empty. Detect it with
-`msg.mentioned_bot and not msg.content_text.strip()`.
+`@`-ed me" events unless the app has the
+`im:message.group_at_msg.include_bot:readonly` permission enabled (distinct from
+`im:message.group_at_msg:readonly`, which only covers *user* mentions) — and the
+failure is silent. There is no API to self-check this; if bot-to-bot mentions
+never arrive, verify that permission first (see the Feishu open-platform
+"receive message events" documentation). An `@`-only ping (no body) still wakes
+the bot: `mentioned_bot` is `True`.
+`content_text` still renders the mention; use `body_text` (the bot's own mention
+removed) to detect a bare poke: `msg.mentioned_bot and not msg.body_text.strip()`.
 
 **Roster.**
 
@@ -411,7 +415,9 @@ while `content_text` is empty. Detect it with
 
 `ChatMember` = `id`, `id_type`, `name`, `tenant_key`, `is_bot`. Provide a
 `resolve_chat_members` config hook (`(chat_id) -> list[ChatMember] | None`, sync
-or async) to source the roster from your own directory instead of the API
+or async) to source the roster from your own directory instead of the API.
+**Both `None` and an empty list `[]` fall back to the API** — the hook only
+overrides the roster when it returns a non-empty list
 (return `None` to fall back to the API).
 
 **Replying to the right place.** `await channel.reply(msg, message, opts=None)`

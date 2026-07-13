@@ -86,6 +86,7 @@ from .errors import (
     OutboundSendError,
     SendError,
     classify_api_error,
+    classify_http_status,
 )
 from .identity import IdentityResolver, NameCache
 from .keepalive import KeepaliveWatchdog
@@ -237,6 +238,15 @@ def _normalize_fetched_message_item(item: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(body, dict) and body.get("content") is not None:
             msg["content"] = body.get("content")
     return msg
+
+
+def _status_error_code(status: Optional[int]) -> "FeishuChannelErrorCode":
+    """Map an HTTP status to a channel error code, defaulting to UNKNOWN when
+    the status is absent or a 2xx (a malformed/unexpected body on a 2xx isn't an
+    HTTP-level failure)."""
+    if status is not None and status >= 400:
+        return classify_http_status(status)
+    return FeishuChannelErrorCode.UNKNOWN
 
 
 def _extract_fetched_sender(item: Dict[str, Any]) -> Any:
@@ -1492,15 +1502,10 @@ class FeishuChannel:
             )
             if inbound is None:
                 return
-            # Seed the roster from observed mentions (incl. bots, which the
-            # members API filters out) so a bot that has "shown its face" can
-            # later be @'d by name. Best-effort; source 'mention' never
-            # overwrites authoritative 'api' names.
-            self._collect_mentions_into_roster(inbound)
-            # Opt-in: fill sender_name from the chat roster (warmed via a cached
-            # get_chat_members). Off by default → no extra roster API call.
-            if self._config.resolve_sender_names:
-                await self._resolve_sender_name_from_roster(inbound)
+            # NB: roster collection and sender-name resolution happen only AFTER
+            # the safety pipeline admits the message (in _dispatch_inbound_to_user),
+            # so a policy/stale/dedup/self-sent-rejected message can neither write
+            # the roster nor trigger the external members API.
             if self._safety is not None:
                 await self._safety.push_message(inbound)
             else:
@@ -1539,6 +1544,14 @@ class FeishuChannel:
                 inbound.sender.display_name = name
 
     async def _dispatch_inbound_to_user(self, inbound) -> None:
+        # Runs only for admitted messages (the safety pipeline's on_message, or
+        # the direct path when no safety pipeline). Seed the roster from observed
+        # mentions (incl. bots, which the members API filters out) so a bot that
+        # has "shown its face" can later be @'d by name; source 'mention' never
+        # overwrites authoritative 'api' names. Then optionally fill sender_name.
+        self._collect_mentions_into_roster(inbound)
+        if self._config.resolve_sender_names:
+            await self._resolve_sender_name_from_roster(inbound)
         await self._invoke("message", inbound)
 
     def _emit_reject(self, event: RejectEvent) -> None:
@@ -2468,19 +2481,26 @@ class FeishuChannel:
         if provided, overrides the API. Raises :class:`FeishuChannelError` on
         API failure.
         """
+        # Cache is keyed by id_type: a user_id query must not be satisfied by an
+        # open_id snapshot (their ChatMember.id values differ).
         if not force:
-            cached = self._chat_member_cache.get_members(chat_id)
+            cached = self._chat_member_cache.get_members(chat_id, id_type)
             if cached is not None:
                 return cached
-        members = await self._fetch_chat_members(
+        members, complete = await self._fetch_chat_members(
             chat_id, page_size=page_size, max_pages=max_pages, id_type=id_type
         )
-        self._chat_member_cache.set_members(chat_id, members, "api")
+        self._chat_member_cache.set_members(
+            chat_id, members, "api", id_type=id_type, complete=complete
+        )
         return members
 
     async def _fetch_chat_members(
         self, chat_id: str, *, page_size: int, max_pages: int, id_type: str
-    ) -> List[ChatMember]:
+    ) -> "tuple[List[ChatMember], bool]":
+        """Returns ``(members, complete)``. ``complete`` is ``False`` when paging
+        stopped at ``max_pages`` while the API still reported more members (so a
+        truncated list is never treated as an authoritative full roster)."""
         hook = self._config.resolve_chat_members
         if hook is not None:
             result = hook(chat_id)
@@ -2489,12 +2509,14 @@ class FeishuChannel:
             # A non-empty roster from the hook wins; ``None`` or an empty list
             # both mean "no data from the hook" and fall back to the API.
             if result:
-                return list(result)
+                return list(result), True
 
         size = min(max(page_size, 1), 100)
         out: List[ChatMember] = []
         page_token: Optional[str] = None
-        for _ in range(max_pages):
+        seen_tokens: Set[str] = set()
+        complete = True
+        for page in range(max_pages):
             queries: List[tuple] = [
                 ("member_id_type", id_type),
                 ("page_size", str(size)),
@@ -2519,10 +2541,28 @@ class FeishuChannel:
                         is_bot=False,
                     )
                 )
-            if not data.get("has_more") or not data.get("page_token"):
+            next_token = data.get("page_token")
+            if not data.get("has_more") or not next_token:
                 break
-            page_token = data.get("page_token")
-        return out
+            if next_token in seen_tokens:
+                logger.warning(
+                    "channel: get_chat_members(%s) repeated page_token — stopping",
+                    chat_id,
+                )
+                complete = False
+                break
+            seen_tokens.add(next_token)
+            page_token = next_token
+            if page == max_pages - 1:
+                # About to exit on max_pages while more members remain.
+                complete = False
+                logger.warning(
+                    "channel: get_chat_members(%s) truncated at max_pages=%d "
+                    "(has_more still true) — result cached as incomplete",
+                    chat_id,
+                    max_pages,
+                )
+        return out, complete
 
     async def get_chat_bots(
         self, chat_id: str, *, force: bool = False
@@ -2578,11 +2618,28 @@ class FeishuChannel:
         req.queries = list(queries)
         req.token_types = {AccessTokenType.TENANT}
         option = RequestOption()
-        # Raw Transport bypasses the Chain that normally injects the tenant
-        # token; call verify explicitly (see bot_identity for the same pattern).
-        _token_auth.verify(self._client.config, req, option)
+        timeout = self._config.transport.http_timeout_seconds or 30.0
         try:
-            resp = await Transport.aexecute(self._client.config, req, option)
+            # Token verify may fetch/refresh the tenant token synchronously; run
+            # it off the event loop so it can't block other message processing,
+            # and fold token + transport errors into the unified error type. A
+            # total timeout bounds the whole operation (not just a socket read).
+            async def _run() -> Any:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, _token_auth.verify, self._client.config, req, option
+                )
+                return await Transport.aexecute(self._client.config, req, option)
+
+            resp = await asyncio.wait_for(_run(), timeout=timeout)
+        except FeishuChannelError:
+            raise
+        except asyncio.TimeoutError as e:
+            raise FeishuChannelError(
+                FeishuChannelErrorCode.SEND_TIMEOUT,
+                f"chat roster request timed out after {timeout}s",
+                cause=e,
+            ) from e
         except Exception as e:
             raise FeishuChannelError(
                 FeishuChannelErrorCode.UNKNOWN,
@@ -2597,18 +2654,37 @@ class FeishuChannel:
             raise FeishuChannelError(
                 FeishuChannelErrorCode.UNKNOWN, "empty roster response"
             )
+        status = getattr(resp, "status_code", None)
         try:
             body = json.loads(resp.content.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as e:
             raise FeishuChannelError(
-                FeishuChannelErrorCode.UNKNOWN, "malformed roster response", cause=e
+                _status_error_code(status),
+                "malformed roster response",
+                cause=e,
+                context={"status": status},
             ) from e
+        # A non-object top-level JSON (e.g. a bare array) must not reach `.get`.
+        if not isinstance(body, dict):
+            raise FeishuChannelError(
+                _status_error_code(status),
+                "unexpected roster response shape (expected a JSON object)",
+                context={"status": status},
+            )
         code = body.get("code")
         if code:
             raise FeishuChannelError(
                 classify_api_error(code, body.get("msg") or ""),
                 body.get("msg") or f"roster request returned code {code}",
-                context={"code": code},
+                context={"code": code, "status": status},
+            )
+        # An HTTP error with no (or zero) business code must not be treated as an
+        # empty success — surface it as a typed error instead of caching [].
+        if status is not None and not (200 <= status < 300):
+            raise FeishuChannelError(
+                classify_http_status(status),
+                body.get("msg") or f"roster request failed with HTTP {status}",
+                context={"status": status},
             )
         data = body.get("data")
         return data if isinstance(data, dict) else {}

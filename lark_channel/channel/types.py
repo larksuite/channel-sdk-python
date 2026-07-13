@@ -457,6 +457,13 @@ class InboundMessage:
     batched_sources: Optional[List["InboundMessage"]] = None
     chat_mode: Optional[str] = None
     safe_content_text: str = ""
+    # `content_text` with the CURRENT bot's own @-mention removed (whitespace
+    # around the removed mention collapsed; newlines preserved). A convenience
+    # for command parsing and bare-@ wake detection
+    # (`mentioned_bot and not body_text.strip()`). Equals `content_text` when the
+    # bot is not mentioned or the content is not text/post. `content_text` itself
+    # is unchanged and still carries the rendered mention.
+    body_text: str = ""
 
     @property
     def message_id(self) -> str:

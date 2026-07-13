@@ -146,6 +146,65 @@ async def test_pipeline_reject_emits_bot_loop_reason():
     assert rejects[0].reason == "bot_loop"
 
 
+def test_reconfigure_enable_disable_takes_effect():
+    # disabled -> enabled makes the next eligible message trip immediately;
+    # enabled -> disabled stops tripping (runtime config actually takes effect).
+    guard = LoopGuard(BotLoopGuardConfig(enabled=False), Mock())
+    assert guard.record(_msg("m1", 0)) is False  # disabled
+
+    guard.reconfigure(BotLoopGuardConfig(enabled=True, max_bot_mentions=1, window_ms=60000))
+    assert guard.record(_msg("m2", 10)) is True  # now enabled, threshold 1
+
+    guard.reconfigure(BotLoopGuardConfig(enabled=False))
+    assert guard.record(_msg("m3", 20)) is False  # disabled again
+
+
+def test_reconfigure_threshold_change_clears_state():
+    guard = _guard(window_ms=60000, max_bot_mentions=3)
+    guard.record(_msg("m1", 0))
+    guard.record(_msg("m2", 10))  # count 2 of 3
+    # Changing the threshold clears counting state, so we start fresh at 1.
+    guard.reconfigure(BotLoopGuardConfig(enabled=True, window_ms=60000, max_bot_mentions=2))
+    assert guard.record(_msg("m3", 20)) is False  # count 1 of 2
+    assert guard.record(_msg("m4", 30)) is True   # count 2 of 2
+
+
+def test_threshold_below_one_is_clamped_and_can_trip():
+    # max_bot_mentions=0 would otherwise be nonsensical; it clamps to 1 so a
+    # single eligible message trips (never silently disables the guard).
+    guard = _guard(window_ms=60000, max_bot_mentions=0)
+    assert guard.record(_msg("m1", 0)) is True
+
+
+def test_out_of_order_stale_event_does_not_join_future_window():
+    # A future-timestamped event followed by a stale (older) event must not be
+    # grouped into the same window — the stale event falls outside it.
+    guard = _guard(window_ms=1000, max_bot_mentions=2)
+    assert guard.record(_msg("m_future", 100000)) is False  # count 1
+    assert guard.record(_msg("m_stale", 0)) is False        # outside window, not counted
+
+
+async def test_pipeline_update_policy_reconfigures_loop_guard():
+    loop = asyncio.get_running_loop()
+    rejects = []
+    pipe = SafetyPipeline(
+        loop=loop,
+        on_message=lambda m: None,
+        on_reject=lambda r: rejects.append(r),
+        policy=PolicyConfig(require_mention=False),  # no guard initially
+        batch_config=TextBatchConfig(delay_ms=0),
+    )
+    # Enable the guard at runtime; it must actually take effect on the pipeline.
+    pipe.update_policy(
+        bot_loop_guard=BotLoopGuardConfig(
+            enabled=True, max_bot_mentions=1, window_ms=60000, on_trip="reject"
+        )
+    )
+    await pipe.push_message(_recent_bot_msg())
+    await asyncio.sleep(0.05)
+    assert len(rejects) == 1 and rejects[0].reason == "bot_loop"
+
+
 async def test_pipeline_without_guard_delivers_bot_mention():
     loop = asyncio.get_running_loop()
     delivered = []

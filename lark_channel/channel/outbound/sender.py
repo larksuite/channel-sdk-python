@@ -10,6 +10,7 @@ Media-upload concerns (resolving a :class:`MediaSource` into a Lark
 
 import inspect
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
@@ -53,12 +54,36 @@ from .routing import infer_receive_id_type
 _ChunkMode = str  # "newline" | "paragraph" | "none"
 
 
+# A structured `<at ...>...</at>` mention is atomic — the chunker must never
+# split one across a message boundary, or the mention breaks (and both halves
+# render broken text). Matched non-greedily so adjacent tags stay separate.
+_AT_TAG_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
+
+
+def _at_spans(text: str) -> list:
+    return [(m.start(), m.end()) for m in _AT_TAG_RE.finditer(text)]
+
+
+def _protect_cut(cut: int, start: int, n: int, spans: list) -> int:
+    """Adjust an absolute cut index so it never falls *inside* an ``<at>`` span.
+    If the cut is inside a span, move it to the span start (push the whole tag
+    to the next chunk); if the span already starts at/before this chunk's start,
+    emit the whole tag instead (the chunk then exceeds ``limit`` — unavoidable
+    for a single oversized tag)."""
+    for s, e in spans:
+        if s < cut < e:
+            return s if s > start else min(e, n)
+    return cut
+
+
 def chunk_text(text: str, limit: int = 3500, mode: _ChunkMode = "newline") -> list:
     """Split ``text`` into ordered chunks of <= ``limit`` chars.
 
     - ``newline``: prefers breaking at the last ``\\n`` within the window.
     - ``paragraph``: prefers breaking at blank-line boundaries.
     - ``none``: hard slice at ``limit`` chars.
+
+    A ``<at ...>...</at>`` mention is never split across chunks.
     """
     if not text:
         return []
@@ -66,30 +91,35 @@ def chunk_text(text: str, limit: int = 3500, mode: _ChunkMode = "newline") -> li
         return [text]
     if len(text) <= limit:
         return [text]
-    if mode == "none":
-        return [text[i : i + limit] for i in range(0, len(text), limit)]
-    if mode == "paragraph":
-        return _chunk_by_delim(text, limit, delim="\n\n")
-    return _chunk_by_delim(text, limit, delim="\n")
+    delim = {"paragraph": "\n\n", "newline": "\n"}.get(mode)  # None for "none"
+    return _chunk_by_delim(text, limit, delim, _at_spans(text))
 
 
-def _chunk_by_delim(text: str, limit: int, delim: str) -> list:
+def _chunk_by_delim(text: str, limit: int, delim: "Optional[str]", spans: list) -> list:
     chunks = []
     i = 0
     n = len(text)
-    delim_len = len(delim)
     while i < n:
         if n - i <= limit:
             chunks.append(text[i:])
             break
-        window = text[i : i + limit]
-        idx = window.rfind(delim)
-        if idx <= 0:
-            chunks.append(window)
-            i += limit
+        idx = text.rfind(delim, i, i + limit) if delim else -1
+        if idx <= i:
+            # No usable delimiter in the window: hard cut at the limit, nudged
+            # off any <at> tag boundary.
+            cut = _protect_cut(i + limit, i, n, spans)
+            chunks.append(text[i:cut])
+            i = cut
         else:
-            chunks.append(window[:idx])
-            i += idx + delim_len
+            cut = _protect_cut(idx, i, n, spans)
+            if cut != idx:
+                # The delimiter break landed inside an <at> tag — use the
+                # protected boundary and don't consume a delimiter there.
+                chunks.append(text[i:cut])
+                i = cut
+            else:
+                chunks.append(text[i:idx])
+                i = idx + len(delim)
     return [c for c in chunks if c]
 
 
@@ -388,9 +418,15 @@ class OutboundSender:
         last_result: SendResult = SendResult.fail(SendError(code=FeishuChannelErrorCode.UNKNOWN, retryable=False))
         for idx, body in enumerate(body_list):
             req_uuid = uuid_ if (idx == 0 and uuid_) else str(uuid.uuid4())
-            # Only apply `reply_to` to the first chunk; subsequent chunks are
-            # fresh messages so they all render in the original chat.
-            effective_reply_to = reply_to if idx == 0 else None
+            # For a thread reply, EVERY chunk must reply (with reply_in_thread)
+            # so the whole message stays in the topic thread — otherwise only the
+            # first chunk lands in-thread and the rest fall to the main timeline.
+            # For a flat reply, keep the legacy behavior: only the first chunk
+            # quote-replies; subsequent chunks are fresh messages.
+            if reply_in_thread is True:
+                effective_reply_to = reply_to
+            else:
+                effective_reply_to = reply_to if idx == 0 else None
             result = await self._send_one_with_fallback(
                 body=body,
                 receive_id=receive_id,

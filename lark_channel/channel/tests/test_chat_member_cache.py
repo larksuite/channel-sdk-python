@@ -74,6 +74,38 @@ def test_ttl_expiry_with_injected_clock():
     assert not cache.get_members("oc_c")
 
 
+def test_api_refresh_drops_departed_member():
+    # A full API snapshot replaces the previous one, so a member who left the
+    # chat is no longer resolvable (index rebuilt from the fresh snapshot).
+    cache = ChatMemberCache()
+    cache.set_members("c", [_member("ou_a", "Alice"), _member("ou_b", "Bob")], source="api")
+    assert cache.resolve_open_id("c", "Alice") == "ou_a"
+
+    cache.set_members("c", [_member("ou_b", "Bob")], source="api")  # Alice left
+    assert cache.resolve_open_id("c", "Alice") is None
+    assert cache.resolve_open_id("c", "Bob") == "ou_b"
+
+
+def test_api_refresh_reevaluates_resolved_ambiguity():
+    # Two "Sam"s → ambiguous; after one leaves, the name resolves again.
+    cache = ChatMemberCache()
+    cache.set_members("c", [_member("ou_a", "Sam"), _member("ou_b", "Sam")], source="api")
+    assert cache.resolve_open_id("c", "Sam") is None  # ambiguous
+
+    cache.set_members("c", [_member("ou_a", "Sam")], source="api")  # one Sam left
+    assert cache.resolve_open_id("c", "Sam") == "ou_a"
+
+
+def test_non_open_id_snapshot_does_not_feed_name_index():
+    # A user_id-typed snapshot must not populate the name→open_id index (a
+    # user_id can't be used in an <at>), and must not satisfy an open_id query.
+    cache = ChatMemberCache()
+    cache.set_members("c", [_member("u_a", "Alice")], source="api", id_type="user_id")
+    assert cache.resolve_open_id("c", "Alice") is None
+    assert cache.get_members("c", "user_id") is not None
+    assert cache.get_members("c", "open_id") is None
+
+
 def test_lru_evicts_oldest_chat_over_max_chats():
     cache = ChatMemberCache(max_chats=2)
     cache.set_members("c1", [_member("ou_1", "One")], source="api")

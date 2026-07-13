@@ -190,6 +190,11 @@ def coerce_send_opts(
         reply_target_gone=_coerce_reply_target_gone(
             _dict_get_any(opts, ("replyTargetGone", "reply_target_gone"))
         ),
+        resolve_mentions_in_text=bool(
+            _dict_get_any(
+                opts, ("resolveMentionsInText", "resolve_mentions_in_text")
+            )
+        ),
     )
 
 

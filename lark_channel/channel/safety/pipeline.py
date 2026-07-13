@@ -98,6 +98,11 @@ class SafetyPipeline:
 
     def update_policy(self, **changes) -> None:
         self._policy.update_policy(**changes)
+        # Keep the runtime loop guard in sync — otherwise a runtime
+        # enable/disable or threshold change would be reflected in get_policy()
+        # but never actually take effect.
+        if "bot_loop_guard" in changes:
+            self._loop_guard.reconfigure(changes["bot_loop_guard"])
 
     def get_policy(self) -> PolicyConfig:
         return self._policy.get_policy()

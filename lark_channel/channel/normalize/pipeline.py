@@ -194,11 +194,14 @@ class InboundPipeline:
         ext = extract_mentions(raw_mentions)
         mentions: List[Mention] = list(ext.mention_list)
         mentioned_all = ext.mentioned_all
-        # Strip the bot's own @-mention from rendered content (only when this
-        # message actually mentions the bot, so non-bot messages are untouched):
-        # a bare "@bot" wake then normalizes to empty content, and the documented
-        # `mentioned_bot and not content_text.strip()` ping detection works.
+        # Whether this message @-mentions the current bot. Used only to derive
+        # the bot-mention-stripped `body_text` view below; `content_text` itself
+        # keeps the rendered mention so default behavior is unchanged.
         strip_bot = bool(self._bot_open_id) and self._bot_open_id in ext.mentions_by_open_id
+        # Placeholder-form primary text captured before resolution, so `body_text`
+        # can strip the bot's own mention precisely (by placeholder, not by
+        # rendered-name string matching).
+        primary_raw_text: Optional[str] = None
         if isinstance(content, TextContent):
             # Feishu frequently ships ``@all`` messages with
             # ``mentions = null`` — the only signal is an ``@_all``
@@ -208,15 +211,13 @@ class InboundPipeline:
             # silently skipped.
             if not mentioned_all and text_has_mention_all(content.text):
                 mentioned_all = True
-            content.text = resolve_mentions(
-                content.text, ext, strip_bot_mentions=strip_bot, bot_open_id=self._bot_open_id
-            )
+            primary_raw_text = content.text
+            content.text = resolve_mentions(content.text, ext)
         elif isinstance(content, PostContent):
             if not mentioned_all and text_has_mention_all(content.text):
                 mentioned_all = True
-            content.text = resolve_mentions(
-                content.text, ext, strip_bot_mentions=strip_bot, bot_open_id=self._bot_open_id
-            )
+            primary_raw_text = content.text
+            content.text = resolve_mentions(content.text, ext)
             at_mentions, at_all, stripped = parse_at_tags(content.text)
             content.text = stripped
             # Merge <at>-tag mentions in (dedup by open_id/user_id/key).
@@ -305,11 +306,21 @@ class InboundPipeline:
         # merge_forward child content (parsed but not yet resolved because
         # flatten walks children sync without a ctx). Idempotent on text that
         # contains no placeholders.
-        flat_text = resolve_mentions(
-            flat_text, ext, strip_bot_mentions=strip_bot, bot_open_id=self._bot_open_id
-        )
+        flat_text = resolve_mentions(flat_text, ext)
         safe_flat_text = _safe_content_text(flat_text)
         content_text = safe_flat_text if self._cfg.security.strict_content_text else flat_text
+
+        # `body_text`: content_text with the CURRENT bot's own @-mention removed
+        # (placeholder-precise). content_text above keeps the rendered mention,
+        # so callers that don't read body_text see unchanged default behavior.
+        if strip_bot and primary_raw_text is not None:
+            body_raw = resolve_mentions(
+                primary_raw_text, ext, strip_bot_mentions=True, bot_open_id=self._bot_open_id
+            )
+            body_safe = _safe_content_text(body_raw)
+            body_text = body_safe if self._cfg.security.strict_content_text else body_raw
+        else:
+            body_text = content_text
 
         return InboundMessage(
             id=message_id,
@@ -323,6 +334,7 @@ class InboundPipeline:
             raw=msg if self._cfg.inbound.include_raw and isinstance(msg, dict) else {},
             content_text=content_text,
             safe_content_text=safe_flat_text,
+            body_text=body_text,
             resources=resources,
             mentioned_bot=mentioned_bot,
             chat_mode=chat_mode,

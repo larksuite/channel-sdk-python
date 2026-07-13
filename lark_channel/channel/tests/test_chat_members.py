@@ -173,6 +173,43 @@ async def test_api_failure_raises_channel_error():
             await ch.get_chat_members("oc_chat")
 
 
+async def test_http_error_without_business_code_is_not_empty_success():
+    # HTTP 503 with a JSON body that has no non-zero `code` must raise, not be
+    # cached as an empty (zero-member) roster.
+    spy = _Spy([_raw({"message": "unavailable"}, status=503)])
+    ch = _channel()
+    with patch(_VERIFY, side_effect=_fake_verify), patch(_TRANSPORT, side_effect=spy):
+        with pytest.raises(FeishuChannelError):
+            await ch.get_chat_members("oc_chat")
+
+
+async def test_non_object_json_raises_channel_error_not_attributeerror():
+    # A bare top-level array must surface as FeishuChannelError, not leak an
+    # AttributeError from calling .get() on a list.
+    spy = _Spy([_raw([{"member_id": "ou_a"}], status=200)])
+    ch = _channel()
+    with patch(_VERIFY, side_effect=_fake_verify), patch(_TRANSPORT, side_effect=spy):
+        with pytest.raises(FeishuChannelError):
+            await ch.get_chat_members("oc_chat")
+
+
+async def test_cache_is_keyed_by_id_type():
+    # A user_id query must not be served from an open_id snapshot (their .id
+    # values differ), so a differing id_type is a cache miss → a fresh request.
+    spy = _Spy([
+        _member_page([_member_item("ou_a", "Alice")]),
+        _member_page([{"member_id_type": "user_id", "member_id": "u_a", "name": "Alice"}]),
+    ])
+    ch = _channel()
+    with patch(_VERIFY, side_effect=_fake_verify), patch(_TRANSPORT, side_effect=spy):
+        first = await ch.get_chat_members("oc_chat", id_type="open_id")
+        second = await ch.get_chat_members("oc_chat", id_type="user_id")
+
+    assert first[0].id == "ou_a"
+    assert second[0].id == "u_a"
+    assert len(spy.requests) == 2  # different id_type did not hit the cache
+
+
 async def test_chat_id_is_url_encoded_via_paths_not_bare_fstring():
     """Security: caller-supplied chat_id must go through ``req.paths`` (encoded
     by ``_build_url``), never interpolated raw into ``req.uri`` — otherwise a
