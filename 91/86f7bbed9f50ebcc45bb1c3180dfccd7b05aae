@@ -1,0 +1,55 @@
+lark_channel/channel/config.py
+  s_4207aa778ab373::t_fafad6bcd0b272 533-540
+lark_channel/channel/tests/test_chat_member_cache.py
+  s_4207aa778ab373::t_050e53a648ff6d 109-167
+lark_channel/channel/tests/test_loop_guard.py
+  s_4207aa778ab373::t_b235723a050095 21-27,193-253
+lark_channel/channel/channel.py
+  s_4207aa778ab373::t_1d7b0228a97ae5 435-438,1542-1546,2493-2497,2504-2508,2510-2517,2520-2564,2573,2577-2583,2653-2655,2659-2676
+lark_channel/core/cache/local_cache.py
+  s_4207aa778ab373::t_5bf0426f5875e1 1,12-16,19-28,31-32
+lark_channel/channel/normalize/pipeline.py
+  s_4207aa778ab373::t_d233ecb6a2f345 27,314-329
+lark_channel/channel/tests/test_token_cache_concurrency.py
+  s_4207aa778ab373::t_823a36d34c5316 1-39
+lark_channel/channel/tests/test_body_text_batching_post.py
+  s_4207aa778ab373::t_4d8183a15b257c 1-85
+lark_channel/channel/normalize/converters/post.py
+  s_4207aa778ab373::t_d6597884764c68 19-28,37-39,78-80,96,141-143,165-166
+lark_channel/channel/tests/test_chat_members.py
+  s_4207aa778ab373::t_be031d31ebe299 14,177-238
+lark_channel/channel/safety/pipeline.py
+  s_4207aa778ab373::t_0613c7820c6947 168-173,183-185
+lark_channel/channel/tests/test_sender_name_resolution.py
+  s_4207aa778ab373::t_6fa5a2425dec65 9-11,14-20,46-85
+lark_channel/channel/outbound/sender.py
+  s_4207aa778ab373::t_77423092b4d276 58-59,63-77
+  s_4207aa778ab373::t_d95dd4d2a1bbca 78-80
+  s_4207aa778ab373::t_b1743c91981905 81-93
+lark_channel/channel/safety/chat_pipeline.py
+  s_4207aa778ab373::t_365f6dc0d538cf 67-75,88-93
+lark_channel/channel/chat_member_cache.py
+  s_4207aa778ab373::t_4072f0ea650493 3,8-28,31,34,58,60-61,81-84,97-115,118-134,139-141,144-146,149-151,154-157,159,190-193,196-203,207-208,212,216-217,221-228
+lark_channel/channel/safety/loop_guard.py
+  s_4207aa778ab373::t_c1a5a2a7f23bdc 14,35-37,69-90,108-111
+lark_channel/channel/tests/test_reply_thread_and_chunk.py
+  s_4207aa778ab373::t_ef911b194ebf6b 80-91
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9186f7bbed9f50ebcc45bb1c3180dfccd7b05aae",
+  "prompts": {},
+  "sessions": {
+    "s_4207aa778ab373": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "430df44d-0a48-4dcf-9d44-d80c052f30a1",
+        "model": "unknown"
+      },
+      "human_author": "mazhe.nerd <mazhe.nerd@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
