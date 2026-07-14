@@ -40,7 +40,7 @@ asyncio.run(channel.connect())
 
 - [快速开始](docs/quickstart.md)
 - [从 `lark_oapi.channel` 迁移](docs/migration-from-lark-oapi.md)
-- [API 参考](docs/reference.md)
+- [API 参考](docs/reference.md) —— 含 [Bot-at-bot](docs/reference.md#bot-at-bot)（多 bot 协作：发送方类型、群成员 roster、回复话题跟随、按名字 `@`、死循环守卫）
 - [安全配置](docs/security.md)
 - [Markdown 消息](docs/markdown.md)
 - [Webhook 服务适配](docs/webhook-server.md)

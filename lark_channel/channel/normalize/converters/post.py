@@ -16,6 +16,16 @@ def convert(content: PostContent) -> Tuple[str, List[ResourceDescriptor]]:
     return md, resources
 
 
+def convert_body(content: PostContent, drop_open_id: str) -> str:
+    """Flatten a post to Markdown with the given open_id's ``<at>`` mention
+    removed (both structured ``tag:at`` nodes and inline ``<at user_id=…>``),
+    preserving the title, formatting, links and everyone else's mentions.
+    Used to build :attr:`InboundMessage.body_text` for post content."""
+    if content.post:
+        return _post_to_markdown(content.post, drop_open_id=drop_open_id)[0]
+    return content.text or ""
+
+
 def _iter_documents(post: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not isinstance(post, dict) or not post:
         return []
@@ -24,7 +34,9 @@ def _iter_documents(post: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [doc for doc in post.values() if isinstance(doc, dict)]
 
 
-def _post_to_markdown(post: Dict[str, Any]) -> Tuple[str, List[ResourceDescriptor]]:
+def _post_to_markdown(
+    post: Dict[str, Any], drop_open_id: str = ""
+) -> Tuple[str, List[ResourceDescriptor]]:
     docs = _iter_documents(post)
     if not docs:
         return "", []
@@ -63,6 +75,9 @@ def _post_to_markdown(post: Dict[str, Any]) -> Tuple[str, List[ResourceDescripto
             elif tag == "a":
                 chunks.append(f"[{el.get('text') or ''}]({el.get('href') or ''})")
             elif tag == "at":
+                # Drop the current bot's own mention when building body_text.
+                if drop_open_id and el.get("user_id") == drop_open_id:
+                    continue
                 nm = el.get("user_name") or el.get("user_id") or ""
                 chunks.append(f"@{nm}")
             elif tag == "emotion":
@@ -78,7 +93,7 @@ def _post_to_markdown(post: Dict[str, Any]) -> Tuple[str, List[ResourceDescripto
             elif tag == "hr":
                 chunks.append("---")
             elif tag == "md":
-                text, res = _process_md_text(el.get("text") or "")
+                text, res = _process_md_text(el.get("text") or "", drop_open_id=drop_open_id)
                 chunks.append(text)
                 resources.extend(res)
         line = "".join(chunks)
@@ -123,7 +138,9 @@ def _post_resources(post: Dict[str, Any]) -> List[ResourceDescriptor]:
     return resources
 
 
-def _process_md_text(text: str) -> Tuple[str, List[ResourceDescriptor]]:
+def _process_md_text(
+    text: str, drop_open_id: str = ""
+) -> Tuple[str, List[ResourceDescriptor]]:
     """Post-process raw markdown text from an "md" element.
 
     Splits by fenced code block delimiters (```) and only applies
@@ -145,6 +162,8 @@ def _process_md_text(text: str) -> Tuple[str, List[ResourceDescriptor]]:
             def _replace_at(m: re.Match) -> str:
                 user_id = m.group(4)
                 name = m.group(5)
+                if drop_open_id and user_id == drop_open_id:
+                    return ""  # remove the current bot's own inline mention
                 if user_id in ("all", "all_members"):
                     return "@all"
                 return f"@{name}" if name else f"@{user_id}"

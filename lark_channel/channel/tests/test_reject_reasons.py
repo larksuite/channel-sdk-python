@@ -15,6 +15,7 @@ EXPECTED_REASONS = {
     "duplicate",
     "lock_contention",
     "self_sent",
+    "bot_loop",  # opt-in PolicyConfig.bot_loop_guard, on_trip='reject'
     # Policy
     "policy_dm_disabled",
     "policy_group_disabled",

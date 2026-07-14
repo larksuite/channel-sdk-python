@@ -16,7 +16,11 @@ from lark_channel.channel.types import CachedResource, ResourceDescriptor
 def test_media_cache_config_is_appended_for_positional_compatibility():
     names = [field.name for field in fields(ChannelConfig)]
 
-    assert names[-2:] == ["media_cache", "security"]
+    # media_cache/security keep their positions; the bot-at-bot knobs
+    # (resolve_sender_names / resolve_chat_members) were appended after them,
+    # so existing positional callers are unaffected.
+    assert names[-2:] == ["resolve_sender_names", "resolve_chat_members"]
+    assert names[names.index("security") - 1] == "media_cache"
     assert names[names.index("chat_mode_cache") + 1] == "policy"
 
 

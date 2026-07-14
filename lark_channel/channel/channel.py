@@ -38,13 +38,19 @@ import json
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Set, Union
 
 from lark_channel.client import Client
-from lark_channel.core.enum import LogLevel
+from lark_channel.core.enum import AccessTokenType, HttpMethod, LogLevel
+from lark_channel.core.http import Transport
 from lark_channel.core.log import logger
+from lark_channel.core.model import BaseRequest, RequestOption
+# Imported as a module (not ``from …auth import verify``) so the tenant-token
+# injection is reached via ``_token_auth.verify`` — tests patch it at its source
+# (``lark_channel.core.token.auth.verify``), which a local alias would bypass.
+from lark_channel.core.token import auth as _token_auth
 from lark_channel.event.callback.model.p2_card_action_trigger import (
     P2CardActionTrigger,
     P2CardActionTriggerResponse,
@@ -60,6 +66,7 @@ from lark_channel.core.cache import ICache
 from .auth.token_store import InMemoryTokenStore, TokenStore
 from .auth.uat_runner import require_user_auth
 from .bot_identity import BotIdentity, fetch_bot_identity
+from .chat_member_cache import ChatMemberCache
 from .chat_mode import ChatModeCache
 from .comment import CommentPrimitiveClient
 from .config import (
@@ -73,13 +80,24 @@ from .config import (
     UATConfig,
 )
 from .driver import LarkClientDriver
-from .errors import FeishuChannelError, FeishuChannelErrorCode, OutboundSendError, SendError
+from .errors import (
+    FeishuChannelError,
+    FeishuChannelErrorCode,
+    OutboundSendError,
+    SendError,
+    classify_api_error,
+    classify_http_status,
+)
 from .identity import IdentityResolver, NameCache
 from .keepalive import KeepaliveWatchdog
 from .media_cache import MediaResourceCache
 from .normalize.comment import normalize_comment
 from .normalize.dedup import Deduper, InMemoryDedupStore
 from .normalize.pipeline import InboundPipeline, PipelineConfig, PipelineDeps
+from .outbound.markdown.resolve_mentions import (
+    resolve_mentions_in_text,
+    resolve_name_mentions,
+)
 from .outbound.routing import infer_receive_id_type
 from .outbound.sender import OutboundSender
 from .outbound.streaming.card_stream import CardStreamController
@@ -94,6 +112,7 @@ from .types import (
     CardActionEvent,
     CardActionPayload,
     ChatInfo,
+    ChatMember,
     CommentContext,
     CommentTarget,
     ConnectionSnapshot,
@@ -219,6 +238,15 @@ def _normalize_fetched_message_item(item: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(body, dict) and body.get("content") is not None:
             msg["content"] = body.get("content")
     return msg
+
+
+def _status_error_code(status: Optional[int]) -> "FeishuChannelErrorCode":
+    """Map an HTTP status to a channel error code, defaulting to UNKNOWN when
+    the status is absent or a 2xx (a malformed/unexpected body on a 2xx isn't an
+    HTTP-level failure)."""
+    if status is not None and status >= 400:
+        return classify_http_status(status)
+    return FeishuChannelErrorCode.UNKNOWN
 
 
 def _extract_fetched_sender(item: Dict[str, Any]) -> Any:
@@ -400,6 +428,14 @@ class FeishuChannel:
             cache=NameCache(cfg.inbound.name_cache),
         )
         self._chat_mode_cache = ChatModeCache(cfg.chat_mode_cache)
+        # Per-chat roster (users + bots + observed mentions), shared by
+        # get_chat_members/get_chat_bots, sender_name resolution and the
+        # outbound "@name → open_id" normalization.
+        self._chat_member_cache = ChatMemberCache()
+        # In-flight roster fetches, keyed by (kind, chat_id, id_type), so a burst
+        # of cold requests for the same roster collapses to one upstream call
+        # (also limits concurrent hits on the shared token cache).
+        self._roster_inflight: Dict[str, "asyncio.Future"] = {}
         self._media_cache = MediaResourceCache(cfg.media_cache)
 
         self._token_store: TokenStore = token_store or InMemoryTokenStore()
@@ -571,6 +607,25 @@ class FeishuChannel:
         """
         with self._bot_identity_lock:
             return self._bot_identity
+
+    def get_bot_identity(self) -> BotIdentity:
+        """This bot's own identity (:class:`BotIdentity`) — e.g. to inline into
+        an agent's system prompt so it can tell itself apart from other bots and
+        decide whom to reply to.
+
+        Resolved during :meth:`connect`. Raises
+        :class:`FeishuChannelError` with code ``not_connected`` if called before
+        the identity is available, rather than returning ``None``, so callers
+        don't silently build a prompt with a missing identity. Use the
+        :attr:`bot_identity` property when a ``None`` sentinel is preferred.
+        """
+        identity = self.bot_identity
+        if identity is None:
+            raise FeishuChannelError(
+                FeishuChannelErrorCode.NOT_CONNECTED,
+                "bot identity not resolved yet — call connect() first",
+            )
+        return identity
 
     @property
     def config(self) -> ChannelConfig:
@@ -1451,6 +1506,10 @@ class FeishuChannel:
             )
             if inbound is None:
                 return
+            # NB: roster collection and sender-name resolution happen only AFTER
+            # the safety pipeline admits the message (in _dispatch_inbound_to_user),
+            # so a policy/stale/dedup/self-sent-rejected message can neither write
+            # the roster nor trigger the external members API.
             if self._safety is not None:
                 await self._safety.push_message(inbound)
             else:
@@ -1458,7 +1517,50 @@ class FeishuChannel:
         except Exception as e:
             logger.exception("FeishuChannel.handle_message_event failed: %s", e)
 
+    def _collect_mentions_into_roster(self, inbound) -> None:
+        chat_id = inbound.conversation.chat_id if inbound.conversation else None
+        if not chat_id:
+            return
+        seen = [
+            ChatMember(id=m.open_id, name=m.name, is_bot=m.is_bot)
+            for m in inbound.mentions
+            if m.open_id and m.name
+        ]
+        if seen:
+            self._chat_member_cache.set_members(chat_id, seen, "mention")
+
+    async def _resolve_sender_name_from_roster(self, inbound) -> None:
+        """Warm the chat roster and fill ``sender.display_name`` from it when the
+        pipeline's own name resolution didn't. Best-effort — a roster miss or API
+        failure degrades to leaving the name unset, never raises into dispatch."""
+        chat_id = inbound.conversation.chat_id if inbound.conversation else None
+        open_id = inbound.sender.open_id if inbound.sender else None
+        if not chat_id or not open_id:
+            return
+        try:
+            await self.get_chat_members(chat_id)
+            # A bot sender is NOT in the users list — warm the bots roster too so
+            # a bot-to-bot handoff resolves the sender's name (the core
+            # bot-at-bot case). Cached + singleflight; failure degrades below.
+            if inbound.sender.is_bot:
+                await self.get_chat_bots(chat_id)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("channel: sender-name roster warm failed: %s", e)
+            return
+        if not inbound.sender.display_name:
+            name = self._chat_member_cache.resolve_name(chat_id, open_id)
+            if name:
+                inbound.sender.display_name = name
+
     async def _dispatch_inbound_to_user(self, inbound) -> None:
+        # Runs only for admitted messages (the safety pipeline's on_message, or
+        # the direct path when no safety pipeline). Seed the roster from observed
+        # mentions (incl. bots, which the members API filters out) so a bot that
+        # has "shown its face" can later be @'d by name; source 'mention' never
+        # overwrites authoritative 'api' names. Then optionally fill sender_name.
+        self._collect_mentions_into_roster(inbound)
+        if self._config.resolve_sender_names:
+            await self._resolve_sender_name_from_roster(inbound)
         await self._invoke("message", inbound)
 
     def _emit_reject(self, event: RejectEvent) -> None:
@@ -1835,6 +1937,7 @@ class FeishuChannel:
             outbound = _coerce.coerce_outbound(message)
             send_opts = _coerce.coerce_send_opts(opts)
             rit = send_opts.receive_id_type or infer_receive_id_type(to)
+            outbound = self._resolve_outbound_mentions(to, outbound, send_opts)
             result = await self._sender.send(
                 outbound,
                 receive_id=to,
@@ -1856,6 +1959,57 @@ class FeishuChannel:
                 receive_id_type=rit,
             )
         return result
+
+    def _resolve_outbound_mentions(self, to, outbound, opts):
+        """Resolve "@name" into real mentions against the target chat's roster
+        before sending: fill open_id on name-only structured mentions, and — when
+        ``opts.resolve_mentions_in_text`` — rewrite ``@name`` tokens in a
+        text / markdown body. Both no-op when there's nothing to resolve (or when
+        ``to`` isn't a chat with a roster), so the default send path is untouched.
+        """
+        def lookup(name: str) -> Optional[str]:
+            return self._chat_member_cache.resolve_open_id(to, name)
+
+        if isinstance(outbound, (OutboundText, OutboundPost)) and outbound.mentions:
+            outbound = replace(
+                outbound, mentions=resolve_name_mentions(outbound.mentions, lookup)
+            )
+
+        if opts.resolve_mentions_in_text:
+            if isinstance(outbound, OutboundText) and outbound.text:
+                outbound = replace(
+                    outbound, text=resolve_mentions_in_text(outbound.text, lookup)
+                )
+            elif isinstance(outbound, OutboundPost) and outbound.markdown:
+                outbound = replace(
+                    outbound, markdown=resolve_mentions_in_text(outbound.markdown, lookup)
+                )
+
+        return outbound
+
+    async def reply(self, msg, message, opts=None) -> SendResult:
+        """Reply to a received message, following the triggering message's shape.
+
+        Defaults ``reply_to`` to ``msg.message_id`` and — when the trigger was
+        inside a topic thread (``msg.conversation.thread_id`` present) — defaults
+        ``reply_in_thread`` to ``True`` so the reply lands back in that thread.
+        A flat message stays flat: ``reply`` only *follows* the trigger, it never
+        promotes a flat message into a thread. ``opts`` overrides either default.
+        Semantically a :meth:`send`.
+        """
+        base = _coerce.coerce_send_opts(opts)
+        conversation = getattr(msg, "conversation", None)
+        thread_id = getattr(conversation, "thread_id", None)
+        resolved = replace(
+            base,
+            reply_to=base.reply_to or msg.message_id,
+            reply_in_thread=(
+                base.reply_in_thread
+                if base.reply_in_thread is not None
+                else bool(thread_id)
+            ),
+        )
+        return await self.send(msg.chat_id, message, resolved)
 
     async def _forward_outbound_error(self, err: Any) -> None:
         """Fan-out a send/stream failure to any ``on("error", ...)`` handlers.
@@ -2312,6 +2466,320 @@ class FeishuChannel:
             self._chat_mode_cache.set(chat_id, mode)
             return mode
         return self._config.chat_mode_cache.fallback
+
+    # ------------------------------------------------------------------
+    # Chat roster (bot-at-bot)
+    # ------------------------------------------------------------------
+    async def get_chat_members(
+        self,
+        chat_id: str,
+        *,
+        page_size: int = 100,
+        max_pages: int = 10,
+        id_type: str = "open_id",
+        force: bool = False,
+    ) -> List[ChatMember]:
+        """List a chat's members, following pagination.
+
+        Returns **users only** — Feishu's chat-members API filters bots out, so
+        ``is_bot`` is never ``True`` here; use :meth:`get_chat_bots` for the
+        bots. ``page_size`` is clamped to Feishu's max of 100; ``max_pages``
+        (default 10) caps paging. Results are cached per chat and reused by
+        ``sender_name`` resolution and "@name → open_id"; a second call hits the
+        cache and ``force`` bypasses it. A ``resolve_chat_members`` config hook,
+        if provided, overrides the API. Raises :class:`FeishuChannelError` on
+        API failure.
+        """
+        if max_pages < 1:
+            raise FeishuChannelError(
+                FeishuChannelErrorCode.UNKNOWN,
+                f"get_chat_members: max_pages must be >= 1, got {max_pages}",
+            )
+        # Cache is keyed by id_type: a user_id query must not be satisfied by an
+        # open_id snapshot (their ChatMember.id values differ).
+        if not force:
+            cached = self._chat_member_cache.get_members(chat_id, id_type)
+            if cached is not None:
+                return cached
+        members, complete = await self._roster_singleflight(
+            f"members::{chat_id}::{id_type}",
+            lambda: self._fetch_chat_members(
+                chat_id, page_size=page_size, max_pages=max_pages, id_type=id_type
+            ),
+        )
+        # Only a COMPLETE snapshot becomes authoritative (cached + feeds the
+        # name index). A truncated result is returned to this caller but never
+        # poisons the cache or the name→open_id index — otherwise a partial
+        # roster could make a shared name look unique and mis-@.
+        if complete:
+            self._chat_member_cache.set_members(
+                chat_id, members, "api", id_type=id_type, complete=True
+            )
+        return members
+
+    @staticmethod
+    def _hook_takes_id_type(hook: Callable) -> bool:
+        try:
+            params = [
+                p
+                for p in inspect.signature(hook).parameters.values()
+                if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+            ]
+            return len(params) >= 2
+        except (ValueError, TypeError):  # builtins / C callables without a signature
+            return False
+
+    async def _call_member_hook(
+        self, hook: Callable, chat_id: str, id_type: str
+    ) -> Any:
+        """Invoke a ``resolve_chat_members`` hook without blocking the event loop.
+
+        Supports both ``hook(chat_id)`` and ``hook(chat_id, id_type)``; a sync
+        hook runs in an executor, an async hook is awaited — both bounded by a
+        total timeout so a slow directory can't stall message processing.
+        """
+        timeout = self._config.transport.http_timeout_seconds or 30.0
+        takes_id_type = self._hook_takes_id_type(hook)
+        try:
+            if inspect.iscoroutinefunction(hook):
+                coro = hook(chat_id, id_type) if takes_id_type else hook(chat_id)
+                return await asyncio.wait_for(coro, timeout)
+            loop = asyncio.get_running_loop()
+            call = (
+                (lambda: hook(chat_id, id_type))
+                if takes_id_type
+                else (lambda: hook(chat_id))
+            )
+            result = await asyncio.wait_for(loop.run_in_executor(None, call), timeout)
+            # A sync hook may still hand back an awaitable; await it too.
+            if inspect.isawaitable(result):
+                result = await asyncio.wait_for(result, timeout)
+            return result
+        except asyncio.TimeoutError as e:
+            raise FeishuChannelError(
+                FeishuChannelErrorCode.SEND_TIMEOUT,
+                f"resolve_chat_members hook timed out after {timeout}s",
+                cause=e,
+            ) from e
+
+    async def _fetch_chat_members(
+        self, chat_id: str, *, page_size: int, max_pages: int, id_type: str
+    ) -> "tuple[List[ChatMember], bool]":
+        """Returns ``(members, complete)``. ``complete`` is ``False`` when paging
+        stopped at ``max_pages`` while the API still reported more members (so a
+        truncated list is never treated as an authoritative full roster)."""
+        hook = self._config.resolve_chat_members
+        if hook is not None:
+            result = await self._call_member_hook(hook, chat_id, id_type)
+            # A non-empty roster from the hook wins; ``None`` or an empty list
+            # both mean "no data from the hook" and fall back to the API.
+            if result:
+                for m in result:
+                    if getattr(m, "id_type", id_type) != id_type:
+                        raise FeishuChannelError(
+                            FeishuChannelErrorCode.UNKNOWN,
+                            f"resolve_chat_members returned id_type "
+                            f"{getattr(m, 'id_type', None)!r}; expected {id_type!r}",
+                        )
+                return list(result), True
+
+        size = min(max(page_size, 1), 100)
+        out: List[ChatMember] = []
+        page_token: Optional[str] = None
+        seen_tokens: Set[str] = set()
+        complete = True
+        for page in range(max_pages):
+            queries: List[tuple] = [
+                ("member_id_type", id_type),
+                ("page_size", str(size)),
+            ]
+            if page_token:
+                queries.append(("page_token", page_token))
+            data = await self._raw_tenant_get(
+                "/open-apis/im/v1/chats/:chat_id/members",
+                {"chat_id": chat_id},
+                queries,
+            )
+            for it in data.get("items") or []:
+                member_id = it.get("member_id") or it.get("open_id")
+                if not member_id:
+                    continue
+                out.append(
+                    ChatMember(
+                        id=member_id,
+                        id_type=it.get("member_id_type") or id_type,
+                        name=it.get("name"),
+                        tenant_key=it.get("tenant_key"),
+                        is_bot=False,
+                    )
+                )
+            next_token = data.get("page_token")
+            if not data.get("has_more") or not next_token:
+                break
+            if next_token in seen_tokens:
+                logger.warning(
+                    "channel: get_chat_members(%s) repeated page_token — stopping",
+                    chat_id,
+                )
+                complete = False
+                break
+            seen_tokens.add(next_token)
+            page_token = next_token
+            if page == max_pages - 1:
+                # About to exit on max_pages while more members remain.
+                complete = False
+                logger.warning(
+                    "channel: get_chat_members(%s) truncated at max_pages=%d "
+                    "(has_more still true) — result cached as incomplete",
+                    chat_id,
+                    max_pages,
+                )
+        return out, complete
+
+    async def get_chat_bots(
+        self, chat_id: str, *, force: bool = False
+    ) -> List[ChatMember]:
+        """List the **bots** in a chat — the companion to :meth:`get_chat_members`,
+        which returns users only. Returns :class:`ChatMember`\\ s with
+        ``is_bot=True`` and seeds them into the roster so another bot can be
+        ``@``-ed by name without having appeared in an inbound mention first.
+        Cached per chat like ``get_chat_members`` (``force`` bypasses). Raises
+        :class:`FeishuChannelError` on API failure.
+        """
+        if not force:
+            cached = self._chat_member_cache.get_bots(chat_id)
+            if cached is not None:
+                return cached
+        bots = await self._roster_singleflight(
+            f"bots::{chat_id}", lambda: self._fetch_chat_bots(chat_id)
+        )
+        self._chat_member_cache.set_bots(chat_id, bots)
+        return bots
+
+    async def _roster_singleflight(self, key: str, factory: Callable) -> Any:
+        """Collapse concurrent cold roster fetches for the same key into one
+        upstream call. Same-loop cooperative: the check-and-register below has no
+        await between it, so racers within a loop share the first future."""
+        existing = self._roster_inflight.get(key)
+        if existing is not None:
+            return await existing
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._roster_inflight[key] = fut
+        try:
+            fut.set_result(await factory())
+        except BaseException as e:
+            fut.set_exception(e)
+        finally:
+            self._roster_inflight.pop(key, None)
+        return await fut
+
+    async def _fetch_chat_bots(self, chat_id: str) -> List[ChatMember]:
+        data = await self._raw_tenant_get(
+            "/open-apis/im/v1/chats/:chat_id/members/bots",
+            {"chat_id": chat_id},
+            [],
+        )
+        out: List[ChatMember] = []
+        for it in data.get("items") or []:
+            bot_id = it.get("bot_id")
+            if not bot_id:
+                continue
+            out.append(
+                ChatMember(
+                    id=bot_id,
+                    id_type="open_id",
+                    name=it.get("bot_name"),
+                    is_bot=True,
+                )
+            )
+        return out
+
+    async def _raw_tenant_get(
+        self, uri: str, paths: Dict[str, str], queries: List[tuple]
+    ) -> Dict[str, Any]:
+        """GET a tenant-scoped endpoint that has no generated SDK resource
+        (mirrors :mod:`.bot_identity`). ``chat_id`` and other caller-supplied
+        values go through ``req.paths`` so ``Transport._build_url`` URL-encodes
+        them — never f-stringed raw into the URI (path-traversal guard).
+        """
+        req = BaseRequest()
+        req.http_method = HttpMethod.GET
+        req.uri = uri
+        req.paths = dict(paths)
+        req.queries = list(queries)
+        req.token_types = {AccessTokenType.TENANT}
+        option = RequestOption()
+        timeout = self._config.transport.http_timeout_seconds or 30.0
+        try:
+            # Token verify may fetch/refresh the tenant token synchronously; run
+            # it off the event loop so it can't block other message processing,
+            # and fold token + transport errors into the unified error type. A
+            # total timeout bounds the whole operation (not just a socket read).
+            async def _run() -> Any:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, _token_auth.verify, self._client.config, req, option
+                )
+                return await Transport.aexecute(self._client.config, req, option)
+
+            resp = await asyncio.wait_for(_run(), timeout=timeout)
+        except FeishuChannelError:
+            raise
+        except asyncio.TimeoutError as e:
+            raise FeishuChannelError(
+                FeishuChannelErrorCode.SEND_TIMEOUT,
+                f"chat roster request timed out after {timeout}s",
+                cause=e,
+            ) from e
+        except Exception as e:
+            raise FeishuChannelError(
+                FeishuChannelErrorCode.UNKNOWN,
+                f"chat roster request failed: {e}",
+                cause=e,
+            ) from e
+        return self._parse_tenant_body(resp)
+
+    @staticmethod
+    def _parse_tenant_body(resp: Any) -> Dict[str, Any]:
+        if resp is None or getattr(resp, "content", None) is None:
+            raise FeishuChannelError(
+                FeishuChannelErrorCode.UNKNOWN, "empty roster response"
+            )
+        status = getattr(resp, "status_code", None)
+        try:
+            body = json.loads(resp.content.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as e:
+            raise FeishuChannelError(
+                _status_error_code(status),
+                "malformed roster response",
+                cause=e,
+                context={"status": status},
+            ) from e
+        # A non-object top-level JSON (e.g. a bare array) must not reach `.get`.
+        if not isinstance(body, dict):
+            raise FeishuChannelError(
+                _status_error_code(status),
+                "unexpected roster response shape (expected a JSON object)",
+                context={"status": status},
+            )
+        code = body.get("code")
+        if code:
+            raise FeishuChannelError(
+                classify_api_error(code, body.get("msg") or ""),
+                body.get("msg") or f"roster request returned code {code}",
+                context={"code": code, "status": status},
+            )
+        # An HTTP error with no (or zero) business code must not be treated as an
+        # empty success — surface it as a typed error instead of caching [].
+        if status is not None and not (200 <= status < 300):
+            raise FeishuChannelError(
+                classify_http_status(status),
+                body.get("msg") or f"roster request failed with HTTP {status}",
+                context={"status": status},
+            )
+        data = body.get("data")
+        return data if isinstance(data, dict) else {}
 
     # ------------------------------------------------------------------
     # CardKit preallocation API

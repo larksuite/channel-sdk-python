@@ -137,7 +137,10 @@ async def test_fetch_inbound_message_returns_normalized_message_without_changing
 
     assert inbound is not None
     assert inbound.id == "om_1"
+    # content_text keeps the rendered bot mention (default behavior unchanged);
+    # the bot-mention-stripped view lives on body_text.
     assert inbound.content_text == "hello @Bot"
+    assert inbound.body_text.strip() == "hello"
     assert inbound.mentioned_bot is True
     assert inbound.raw["message_id"] == "om_1"
 

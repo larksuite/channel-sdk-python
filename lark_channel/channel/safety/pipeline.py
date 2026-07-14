@@ -21,6 +21,7 @@ from lark_channel.core.log import logger
 from ..config import PolicyConfig
 from ..types import InboundMessage
 from .chat_pipeline import ChatPipelineManager
+from .loop_guard import LoopGuard
 from .media_pipeline import MediaPipelineManager
 from .policy_gate import PolicyGate
 from .processing_lock import ProcessingLock
@@ -73,7 +74,9 @@ class SafetyPipeline:
             sweep_seconds=dedup_config.sweep_seconds,
         )
         self._lock = ProcessingLock(ttl_ms=processing_lock_ttl_ms)
-        self._policy = PolicyGate(policy or PolicyConfig())
+        policy_obj = policy or PolicyConfig()
+        self._policy = PolicyGate(policy_obj)
+        self._loop_guard = LoopGuard(policy_obj.bot_loop_guard, logger)
         self._manager = ChatPipelineManager(
             config=batch_config or TextBatchConfig(),
             loop=loop,
@@ -95,6 +98,11 @@ class SafetyPipeline:
 
     def update_policy(self, **changes) -> None:
         self._policy.update_policy(**changes)
+        # Keep the runtime loop guard in sync — otherwise a runtime
+        # enable/disable or threshold change would be reflected in get_policy()
+        # but never actually take effect.
+        if "bot_loop_guard" in changes:
+            self._loop_guard.reconfigure(changes["bot_loop_guard"])
 
     def get_policy(self) -> PolicyConfig:
         return self._policy.get_policy()
@@ -157,6 +165,12 @@ class SafetyPipeline:
             self._emit_reject(msg, "self_sent")
             return
 
+        # 2.9 Human-activity reset for the bot loop guard — runs BEFORE the
+        #     policy gate so a plain human message (which require_mention would
+        #     otherwise reject) still breaks an ongoing bot ping-pong.
+        if self._loop_guard.enabled:
+            self._loop_guard.reset_on_human(msg)
+
         # 3. Policy gate
         decision = self._policy.evaluate(msg)
         if not decision.allowed:
@@ -164,6 +178,16 @@ class SafetyPipeline:
                 self._emit_reject(msg, decision.reason)
             else:
                 logger.debug("safety: policy drop message_id=%s reason=None", msg.id)
+            return
+
+        # 3.5 Bot ping-pong guard (opt-in). Counting runs after dedup + self_sent
+        #     + policy so a re-delivery can't inflate the count and a
+        #     policy-rejected message never counts.
+        if self._loop_guard.enabled and self._loop_guard.record(msg):
+            if self._loop_guard.on_trip == "reject":
+                self._emit_reject(msg, "bot_loop")
+            else:
+                logger.debug("safety: drop bot-loop message message_id=%s", msg.id)
             return
 
         # 4. Processing lock

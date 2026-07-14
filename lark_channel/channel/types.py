@@ -31,6 +31,12 @@ class Identity:
     user_id: Optional[str] = None
     display_name: Optional[str] = None
     is_bot: bool = False
+    # Raw sender kind passed through from the event's ``sender.sender_type``
+    # (``'user' | 'bot' | 'system' | 'anonymous' | 'app'`` — plain ``str`` to
+    # tolerate unknown values). ``None`` when the event omits it: the kind is
+    # unknown, which must not be read as "not a bot". ``is_bot`` above stays the
+    # derived convenience (``sender_type in {"bot", "app"}``).
+    sender_type: Optional[str] = None
 
 
 @dataclass
@@ -48,6 +54,24 @@ class Mention:
     is_bot: bool = False
     union_id: Optional[str] = None
     tenant_key: Optional[str] = None
+
+
+@dataclass
+class ChatMember:
+    """One member of a chat, returned by :meth:`FeishuChannel.get_chat_members`
+    (users) and :meth:`FeishuChannel.get_chat_bots` (bots).
+
+    ``get_chat_members`` returns **users only** — Feishu's chat-members API
+    filters bots out — so ``is_bot`` is ``False`` there. ``is_bot`` is ``True``
+    for entries from ``get_chat_bots`` and for roster entries harvested from
+    other sources (e.g. inbound mentions) that can carry bots.
+    """
+
+    id: str
+    id_type: str = "open_id"
+    name: Optional[str] = None
+    tenant_key: Optional[str] = None
+    is_bot: bool = False
 
 
 # ----------------------------------------------------------------------------
@@ -433,6 +457,13 @@ class InboundMessage:
     batched_sources: Optional[List["InboundMessage"]] = None
     chat_mode: Optional[str] = None
     safe_content_text: str = ""
+    # `content_text` with the CURRENT bot's own @-mention removed (whitespace
+    # around the removed mention collapsed; newlines preserved). A convenience
+    # for command parsing and bare-@ wake detection
+    # (`mentioned_bot and not body_text.strip()`). Equals `content_text` when the
+    # bot is not mentioned or the content is not text/post. `content_text` itself
+    # is unchanged and still carries the rendered mention.
+    body_text: str = ""
 
     @property
     def message_id(self) -> str:
@@ -454,6 +485,19 @@ class InboundMessage:
     @property
     def sender_name(self) -> Optional[str]:
         return self.sender.display_name
+
+    @property
+    def sender_type(self) -> Optional[str]:
+        """Raw sender kind (``'user'``/``'bot'``/…), or ``None`` when the event
+        omitted it. See :attr:`Identity.sender_type`."""
+        return self.sender.sender_type
+
+    @property
+    def sender_is_bot(self) -> bool:
+        """``True`` when the sender is a bot/app. Convenience over
+        :attr:`Identity.is_bot` — a missing ``sender_type`` yields ``False``,
+        never a wrong "is a bot"."""
+        return self.sender.is_bot
 
     @property
     def reply_to_message_id(self) -> Optional[str]:
@@ -677,6 +721,11 @@ class SendOpts:
     receive_id_type: Optional[ReceiveIdType] = None
     uuid: Optional[str] = None
     reply_target_gone: ReplyTargetGoneBehavior = "fresh"
+    # Rewrite plaintext ``@<name>`` tokens in a ``{text}`` / ``{markdown}`` body
+    # into real ``<at>`` mentions, resolving each name against the target chat's
+    # member roster. Unknown / ambiguous names are left as plaintext — an
+    # unresolved ``@xxx`` is never turned into a mention. Off by default.
+    resolve_mentions_in_text: bool = False
 
 
 @dataclass

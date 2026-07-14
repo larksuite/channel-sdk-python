@@ -64,6 +64,15 @@ def merge_batch(batch: List[InboundMessage]) -> InboundMessage:
     merged_content = last.content
     if isinstance(merged_content, TextContent) and texts:
         merged_content = TextContent(text="\n\n".join(texts), raw=merged_content.raw)
+
+    # Recombine the derived text views from the source messages (in order) —
+    # otherwise a batched message reverts them to empty and callers relying on
+    # content_text / body_text (e.g. command parsing, bare-@ wake detection)
+    # break on the default aggregation path. Each source already carries its own
+    # correctly-computed views; join the non-empty ones.
+    def _join(field: str) -> str:
+        return "\n\n".join(v for v in (getattr(m, field, "") for m in batch) if v)
+
     merged = _IM(
         id=last.id,
         create_time=last.create_time,
@@ -76,6 +85,12 @@ def merge_batch(batch: List[InboundMessage]) -> InboundMessage:
         content=merged_content,
         raw=last.raw,
         chat_mode=chat_mode,
+        content_text=_join("content_text"),
+        safe_content_text=_join("safe_content_text"),
+        body_text=_join("body_text"),
+        raw_content_type=last.raw_content_type,
+        resources=[r for m in batch for r in (m.resources or [])],
+        batched_sources=list(batch),
     )
     return merged
 

@@ -30,6 +30,7 @@ from .bot_identity import BotIdentity, fetch_bot_identity
 from .card import CardBuilder, new_card
 from .channel import FeishuChannel
 from .config import (
+    BotLoopGuardConfig,
     ChannelConfig,
     ChatModeCacheConfig,
     ChatQueueConfig,
@@ -115,6 +116,7 @@ from .types import (
     CardPayload,
     CachedResource,
     ChatInfo,
+    ChatMember,
     CommentContext,
     CommentTarget,
     ConnectionSnapshot,
@@ -178,6 +180,7 @@ __all__ = [
     # Entry points
     "FeishuChannel",
     # Config
+    "BotLoopGuardConfig",
     "ChannelConfig",
     "ChatModeCacheConfig",
     "ChatQueueConfig",
@@ -275,6 +278,7 @@ __all__ = [
     "CardPayload",
     "CachedResource",
     "ChatInfo",
+    "ChatMember",
     "CommentContext",
     "CommentTarget",
     "CommentEvent",

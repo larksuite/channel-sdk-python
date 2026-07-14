@@ -41,7 +41,7 @@ asyncio.run(channel.connect())
 
 - [Quickstart](docs/quickstart.md)
 - [Migration from `lark_oapi.channel`](docs/migration-from-lark-oapi.md)
-- [API reference](docs/reference.md)
+- [API reference](docs/reference.md) — including [Bot-at-bot](docs/reference.md#bot-at-bot) (multi-bot collaboration: sender type, roster, reply threading, `@`-by-name, loop guard)
 - [Security configuration](docs/security.md)
 - [Markdown messages](docs/markdown.md)
 - [Webhook server adapter](docs/webhook-server.md)
