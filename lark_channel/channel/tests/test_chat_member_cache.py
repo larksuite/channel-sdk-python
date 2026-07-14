@@ -106,6 +106,65 @@ def test_non_open_id_snapshot_does_not_feed_name_index():
     assert cache.get_members("c", "open_id") is None
 
 
+def test_incomplete_snapshot_does_not_feed_name_index():
+    cache = ChatMemberCache()
+    cache.set_members("c", [_member("ou_a", "Alice")], source="api", complete=False)
+    assert cache.resolve_open_id("c", "Alice") is None  # truncated ≠ authoritative
+
+
+def test_incomplete_refresh_does_not_clobber_complete_snapshot():
+    cache = ChatMemberCache()
+    cache.set_members("c", [_member("ou_a", "Alice")], source="api", complete=True)
+    cache.set_members("c", [_member("ou_a", "Alice")], source="api", complete=False)
+    assert cache.resolve_open_id("c", "Alice") == "ou_a"
+
+
+def test_per_id_type_slots_do_not_overwrite_each_other():
+    cache = ChatMemberCache()
+    cache.set_members("c", [_member("ou_a", "Alice")], source="api", id_type="open_id")
+    cache.set_members("c", [ChatMember(id="u_a", name="Alice")], source="api", id_type="user_id")
+    # The user_id snapshot must not erase the open_id name index.
+    assert cache.resolve_open_id("c", "Alice") == "ou_a"
+    assert cache.get_members("c", "open_id") is not None
+    assert cache.get_members("c", "user_id") is not None
+
+
+def test_full_refresh_drops_stale_mention_observation():
+    cache = ChatMemberCache()
+    cache.set_members("c", [ChatMember(id="ou_a", name="Alice", is_bot=False)], source="mention")
+    assert cache.resolve_open_id("c", "Alice") == "ou_a"
+    cache.set_members("c", [_member("ou_b", "Bob")], source="api", complete=True)  # Alice gone
+    assert cache.resolve_open_id("c", "Alice") is None
+
+
+def test_api_rename_supersedes_stale_mention_alias():
+    cache = ChatMemberCache()
+    cache.set_members("c", [ChatMember(id="ou_a", name="OldName")], source="mention")
+    cache.set_members("c", [_member("ou_a", "NewName")], source="api", complete=True)
+    assert cache.resolve_open_id("c", "OldName") is None
+    assert cache.resolve_open_id("c", "NewName") == "ou_a"
+
+
+def test_bots_refresh_reconciles_bot_mention():
+    cache = ChatMemberCache()
+    cache.set_members("c", [ChatMember(id="ou_x", name="GhostBot", is_bot=True)], source="mention")
+    assert cache.resolve_open_id("c", "GhostBot") == "ou_x"
+    cache.set_bots("c", [ChatMember(id="ou_y", name="RealBot", is_bot=True)], complete=True)
+    assert cache.resolve_open_id("c", "GhostBot") is None
+
+
+def test_reads_return_defensive_copies():
+    cache = ChatMemberCache()
+    cache.set_members("c", [_member("ou_a", "Alice")], source="api")
+    got = cache.get_members("c", "open_id")
+    got.clear()
+    got[:] = []
+    again = cache.get_members("c", "open_id")
+    assert [m.id for m in again] == ["ou_a"]  # list mutation didn't affect cache
+    again[0].name = "Hacked"
+    assert cache.resolve_open_id("c", "Alice") == "ou_a"  # member mutation didn't corrupt index
+
+
 def test_lru_evicts_oldest_chat_over_max_chats():
     cache = ChatMemberCache(max_chats=2)
     cache.set_members("c1", [_member("ou_1", "One")], source="api")

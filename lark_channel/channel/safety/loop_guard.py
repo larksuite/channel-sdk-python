@@ -11,6 +11,7 @@ window, and config values are validated so a misconfiguration can't silently
 disable the guard (e.g. a threshold above the per-key cap that could never trip).
 """
 
+import threading
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,6 +32,9 @@ class LoopGuard:
         self._logger = logger
         # key -> {"entries": List[(message_id, time)], "warned": bool, "clock": int}
         self._states: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        # Guards record / reset / reconfigure so a runtime update_policy can't
+        # race the hot record() path — reconfigure atomically swaps config + state.
+        self._lock = threading.Lock()
         self._apply(cfg)
 
     # ---- configuration -------------------------------------------------------
@@ -62,10 +66,28 @@ class LoopGuard:
         """Atomically apply a new config (e.g. from ``update_policy``). Counting
         state is preserved when only ``on_trip`` changed, and cleared otherwise
         (a new window / threshold / scope, or enable/disable, starts clean)."""
-        prev = (self.enabled, self._window_ms, self._threshold, self._scope)
-        self._apply(cfg)
-        if prev != (self.enabled, self._window_ms, self._threshold, self._scope):
-            self._states.clear()
+        with self._lock:
+            prev = (self.enabled, self._window_ms, self._threshold, self._scope)
+            self._apply(cfg)
+            if prev != (self.enabled, self._window_ms, self._threshold, self._scope):
+                self._states.clear()
+
+    def reset_on_human(self, msg: Any) -> None:
+        """Reset the loop counters for a chat when a human speaks — called
+        BEFORE the policy gate so a plain (possibly no-mention, hence
+        policy-rejected) human message still breaks a bot ping-pong. Clears the
+        chat's state in ``chat`` scope, and every ``chat::bot`` key in
+        ``chat+sender`` scope."""
+        if not self.enabled or getattr(msg.sender, "sender_type", None) != "user":
+            return
+        chat_id = msg.conversation.chat_id
+        with self._lock:
+            if self._scope == "chat+sender":
+                prefix = f"{chat_id}::"
+                for key in [k for k in self._states if k == chat_id or k.startswith(prefix)]:
+                    self._states.pop(key, None)
+            else:
+                self._states.pop(chat_id, None)
 
     def _warn(self, fmt: str, *args: Any) -> None:
         warn = getattr(self._logger, "warning", None)
@@ -83,6 +105,10 @@ class LoopGuard:
         """
         if not self.enabled:
             return False
+        with self._lock:
+            return self._record_locked(msg)
+
+    def _record_locked(self, msg: Any) -> bool:
         key = self._key_for(msg)
 
         if msg.sender.sender_type == "user":

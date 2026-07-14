@@ -432,6 +432,10 @@ class FeishuChannel:
         # get_chat_members/get_chat_bots, sender_name resolution and the
         # outbound "@name → open_id" normalization.
         self._chat_member_cache = ChatMemberCache()
+        # In-flight roster fetches, keyed by (kind, chat_id, id_type), so a burst
+        # of cold requests for the same roster collapses to one upstream call
+        # (also limits concurrent hits on the shared token cache).
+        self._roster_inflight: Dict[str, "asyncio.Future"] = {}
         self._media_cache = MediaResourceCache(cfg.media_cache)
 
         self._token_store: TokenStore = token_store or InMemoryTokenStore()
@@ -1535,6 +1539,11 @@ class FeishuChannel:
             return
         try:
             await self.get_chat_members(chat_id)
+            # A bot sender is NOT in the users list — warm the bots roster too so
+            # a bot-to-bot handoff resolves the sender's name (the core
+            # bot-at-bot case). Cached + singleflight; failure degrades below.
+            if inbound.sender.is_bot:
+                await self.get_chat_bots(chat_id)
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("channel: sender-name roster warm failed: %s", e)
             return
@@ -2481,19 +2490,77 @@ class FeishuChannel:
         if provided, overrides the API. Raises :class:`FeishuChannelError` on
         API failure.
         """
+        if max_pages < 1:
+            raise FeishuChannelError(
+                FeishuChannelErrorCode.UNKNOWN,
+                f"get_chat_members: max_pages must be >= 1, got {max_pages}",
+            )
         # Cache is keyed by id_type: a user_id query must not be satisfied by an
         # open_id snapshot (their ChatMember.id values differ).
         if not force:
             cached = self._chat_member_cache.get_members(chat_id, id_type)
             if cached is not None:
                 return cached
-        members, complete = await self._fetch_chat_members(
-            chat_id, page_size=page_size, max_pages=max_pages, id_type=id_type
+        members, complete = await self._roster_singleflight(
+            f"members::{chat_id}::{id_type}",
+            lambda: self._fetch_chat_members(
+                chat_id, page_size=page_size, max_pages=max_pages, id_type=id_type
+            ),
         )
-        self._chat_member_cache.set_members(
-            chat_id, members, "api", id_type=id_type, complete=complete
-        )
+        # Only a COMPLETE snapshot becomes authoritative (cached + feeds the
+        # name index). A truncated result is returned to this caller but never
+        # poisons the cache or the name→open_id index — otherwise a partial
+        # roster could make a shared name look unique and mis-@.
+        if complete:
+            self._chat_member_cache.set_members(
+                chat_id, members, "api", id_type=id_type, complete=True
+            )
         return members
+
+    @staticmethod
+    def _hook_takes_id_type(hook: Callable) -> bool:
+        try:
+            params = [
+                p
+                for p in inspect.signature(hook).parameters.values()
+                if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+            ]
+            return len(params) >= 2
+        except (ValueError, TypeError):  # builtins / C callables without a signature
+            return False
+
+    async def _call_member_hook(
+        self, hook: Callable, chat_id: str, id_type: str
+    ) -> Any:
+        """Invoke a ``resolve_chat_members`` hook without blocking the event loop.
+
+        Supports both ``hook(chat_id)`` and ``hook(chat_id, id_type)``; a sync
+        hook runs in an executor, an async hook is awaited — both bounded by a
+        total timeout so a slow directory can't stall message processing.
+        """
+        timeout = self._config.transport.http_timeout_seconds or 30.0
+        takes_id_type = self._hook_takes_id_type(hook)
+        try:
+            if inspect.iscoroutinefunction(hook):
+                coro = hook(chat_id, id_type) if takes_id_type else hook(chat_id)
+                return await asyncio.wait_for(coro, timeout)
+            loop = asyncio.get_running_loop()
+            call = (
+                (lambda: hook(chat_id, id_type))
+                if takes_id_type
+                else (lambda: hook(chat_id))
+            )
+            result = await asyncio.wait_for(loop.run_in_executor(None, call), timeout)
+            # A sync hook may still hand back an awaitable; await it too.
+            if inspect.isawaitable(result):
+                result = await asyncio.wait_for(result, timeout)
+            return result
+        except asyncio.TimeoutError as e:
+            raise FeishuChannelError(
+                FeishuChannelErrorCode.SEND_TIMEOUT,
+                f"resolve_chat_members hook timed out after {timeout}s",
+                cause=e,
+            ) from e
 
     async def _fetch_chat_members(
         self, chat_id: str, *, page_size: int, max_pages: int, id_type: str
@@ -2503,12 +2570,17 @@ class FeishuChannel:
         truncated list is never treated as an authoritative full roster)."""
         hook = self._config.resolve_chat_members
         if hook is not None:
-            result = hook(chat_id)
-            if inspect.isawaitable(result):
-                result = await result
+            result = await self._call_member_hook(hook, chat_id, id_type)
             # A non-empty roster from the hook wins; ``None`` or an empty list
             # both mean "no data from the hook" and fall back to the API.
             if result:
+                for m in result:
+                    if getattr(m, "id_type", id_type) != id_type:
+                        raise FeishuChannelError(
+                            FeishuChannelErrorCode.UNKNOWN,
+                            f"resolve_chat_members returned id_type "
+                            f"{getattr(m, 'id_type', None)!r}; expected {id_type!r}",
+                        )
                 return list(result), True
 
         size = min(max(page_size, 1), 100)
@@ -2578,9 +2650,29 @@ class FeishuChannel:
             cached = self._chat_member_cache.get_bots(chat_id)
             if cached is not None:
                 return cached
-        bots = await self._fetch_chat_bots(chat_id)
+        bots = await self._roster_singleflight(
+            f"bots::{chat_id}", lambda: self._fetch_chat_bots(chat_id)
+        )
         self._chat_member_cache.set_bots(chat_id, bots)
         return bots
+
+    async def _roster_singleflight(self, key: str, factory: Callable) -> Any:
+        """Collapse concurrent cold roster fetches for the same key into one
+        upstream call. Same-loop cooperative: the check-and-register below has no
+        await between it, so racers within a loop share the first future."""
+        existing = self._roster_inflight.get(key)
+        if existing is not None:
+            return await existing
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._roster_inflight[key] = fut
+        try:
+            fut.set_result(await factory())
+        except BaseException as e:
+            fut.set_exception(e)
+        finally:
+            self._roster_inflight.pop(key, None)
+        return await fut
 
     async def _fetch_chat_bots(self, chat_id: str) -> List[ChatMember]:
         data = await self._raw_tenant_get(

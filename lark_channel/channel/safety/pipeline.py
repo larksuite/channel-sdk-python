@@ -165,6 +165,12 @@ class SafetyPipeline:
             self._emit_reject(msg, "self_sent")
             return
 
+        # 2.9 Human-activity reset for the bot loop guard — runs BEFORE the
+        #     policy gate so a plain human message (which require_mention would
+        #     otherwise reject) still breaks an ongoing bot ping-pong.
+        if self._loop_guard.enabled:
+            self._loop_guard.reset_on_human(msg)
+
         # 3. Policy gate
         decision = self._policy.evaluate(msg)
         if not decision.allowed:
@@ -174,10 +180,9 @@ class SafetyPipeline:
                 logger.debug("safety: policy drop message_id=%s reason=None", msg.id)
             return
 
-        # 3.5 Bot ping-pong guard (opt-in). Runs after dedup + self_sent +
-        #     policy so a re-delivery can't inflate the count and a
-        #     policy-rejected message never counts; a human message (handled
-        #     inside record) resets the window.
+        # 3.5 Bot ping-pong guard (opt-in). Counting runs after dedup + self_sent
+        #     + policy so a re-delivery can't inflate the count and a
+        #     policy-rejected message never counts.
         if self._loop_guard.enabled and self._loop_guard.record(msg):
             if self._loop_guard.on_trip == "reject":
                 self._emit_reject(msg, "bot_loop")

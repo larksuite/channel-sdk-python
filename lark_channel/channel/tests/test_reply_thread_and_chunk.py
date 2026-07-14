@@ -77,6 +77,18 @@ def test_at_tag_pushed_whole_to_next_chunk():
     assert any(tag in c for c in chunks)
 
 
+def test_many_unclosed_at_openers_bounded_time():
+    # Adversarial: many unclosed "<at " openers must not make span-scanning
+    # quadratic (linear single pass). Content is preserved (nothing dropped).
+    import time as _t
+
+    text = "<at " * 50000
+    start = _t.perf_counter()
+    chunks = chunk_text(text, limit=100, mode="none")
+    assert _t.perf_counter() - start < 2.0
+    assert "".join(chunks) == text
+
+
 def test_plain_text_chunking_unchanged_without_tags():
     # No <at> tags → identical to the delimiter chunker (regression guard).
     text = "line1\nline2\nline3\nline4"

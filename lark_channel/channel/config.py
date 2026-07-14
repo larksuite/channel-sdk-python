@@ -530,10 +530,11 @@ class ChannelConfig:
     # via a cached ``get_chat_members``). Off by default → no extra roster API.
     resolve_sender_names: bool = False
     # ``resolve_chat_members``: override how ``get_chat_members`` sources a chat's
-    # roster. When provided and it returns a member list, that list is used and
-    # the Feishu API call is skipped; return ``None`` to fall back to the API.
-    # The callable takes a ``chat_id`` and may be sync or async; results still
-    # flow through the internal roster cache. (Typed ``Any`` to avoid importing
-    # ``ChatMember`` from ``types`` — that would create an import cycle back
-    # through this module.)
-    resolve_chat_members: Optional[Callable[[str], Any]] = None
+    # roster. When it returns a **non-empty** list, that list is used and the
+    # Feishu API call is skipped; **both ``None`` and an empty list ``[]`` fall
+    # back to the API**. The callable takes ``(chat_id)`` or ``(chat_id, id_type)``
+    # and may be sync or async (a sync hook runs off the event loop; both are
+    # bounded by a total timeout); every returned ``ChatMember.id_type`` must
+    # match the requested ``id_type``. Results flow through the internal roster
+    # cache. (Typed ``Any`` to avoid an import cycle with ``types``.)
+    resolve_chat_members: Optional[Callable[..., Any]] = None

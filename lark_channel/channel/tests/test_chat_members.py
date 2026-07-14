@@ -11,6 +11,7 @@ tenant-token injection is patched at its source
 (``lark_channel.core.token.auth.verify``).
 """
 
+import asyncio
 import json
 from unittest.mock import patch
 
@@ -171,6 +172,68 @@ async def test_api_failure_raises_channel_error():
     with patch(_VERIFY, side_effect=_fake_verify), patch(_TRANSPORT, side_effect=spy):
         with pytest.raises(FeishuChannelError):
             await ch.get_chat_members("oc_chat")
+
+
+async def test_hook_receives_id_type_when_two_arg():
+    seen = {}
+
+    def hook(chat_id, id_type):
+        seen["id_type"] = id_type
+        return [ChatMember(id="u_h", name="H", id_type="user_id")]
+
+    ch = _channel(resolve_chat_members=hook)
+    members = await ch.get_chat_members("oc_chat", id_type="user_id")
+    assert seen["id_type"] == "user_id"
+    assert members[0].id == "u_h"
+
+
+async def test_hook_id_type_mismatch_raises():
+    # hook returns open_id members for a user_id request → typed error, not a
+    # silently mistyped id.
+    ch = _channel(resolve_chat_members=lambda cid: [ChatMember(id="ou_a", name="A")])
+    with pytest.raises(FeishuChannelError):
+        await ch.get_chat_members("oc_chat", id_type="user_id")
+
+
+async def test_async_hook_supported():
+    async def hook(chat_id):
+        return [ChatMember(id="ou_h", name="Hooked")]
+
+    ch = _channel(resolve_chat_members=hook)
+    members = await ch.get_chat_members("oc_chat")
+    assert [m.id for m in members] == ["ou_h"]
+
+
+async def test_concurrent_cold_requests_collapse_to_one_fetch():
+    # A burst of cold requests for the same (chat, id_type) shares one upstream
+    # call (singleflight) rather than stampeding the members API / token cache.
+    spy = _Spy([_member_page([_member_item("ou_a", "Alice")])])
+    ch = _channel()
+    with patch(_VERIFY, side_effect=_fake_verify), patch(_TRANSPORT, side_effect=spy):
+        results = await asyncio.gather(*[ch.get_chat_members("oc_chat") for _ in range(10)])
+    assert all(r[0].id == "ou_a" for r in results)
+    assert len(spy.requests) == 1
+
+
+async def test_max_pages_zero_raises_and_does_not_cache():
+    ch = _channel()
+    with pytest.raises(FeishuChannelError):
+        await ch.get_chat_members("oc_chat", max_pages=0)
+    assert ch._chat_member_cache.get_members("oc_chat", "open_id") is None
+
+
+async def test_truncated_result_is_not_cached():
+    # max_pages=1 with has_more always true → truncated → must not be cached, so
+    # a second default call re-fetches rather than serving the partial roster.
+    always_more = _member_page([_member_item("ou_a", "Alice")], has_more=True, page_token="t")
+    spy = _Spy([always_more])
+    ch = _channel()
+    with patch(_VERIFY, side_effect=_fake_verify), patch(_TRANSPORT, side_effect=spy):
+        await ch.get_chat_members("oc_chat", max_pages=1)
+        await ch.get_chat_members("oc_chat", max_pages=1)
+    assert len(spy.requests) == 2  # not cached
+    # And a truncated roster never feeds the name index.
+    assert ch._chat_member_cache.resolve_open_id("oc_chat", "Alice") is None
 
 
 async def test_http_error_without_business_code_is_not_empty_success():

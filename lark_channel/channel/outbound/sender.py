@@ -10,7 +10,6 @@ Media-upload concerns (resolving a :class:`MediaSource` into a Lark
 
 import inspect
 import json
-import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
@@ -56,12 +55,42 @@ _ChunkMode = str  # "newline" | "paragraph" | "none"
 
 # A structured `<at ...>...</at>` mention is atomic — the chunker must never
 # split one across a message boundary, or the mention breaks (and both halves
-# render broken text). Matched non-greedily so adjacent tags stay separate.
-_AT_TAG_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
+# render broken text).
+_AT_CLOSE = "</at>"
 
 
 def _at_spans(text: str) -> list:
-    return [(m.start(), m.end()) for m in _AT_TAG_RE.finditer(text)]
+    """Absolute (start, end) spans of complete ``<at …>…</at>`` tags.
+
+    Single-pass / linear-time by design: each character is visited at most once,
+    so adversarial input with many unclosed ``<at`` openers can't make the scan
+    quadratic (or block the send loop). Unclosed / malformed openers are skipped.
+    """
+    spans = []
+    i = 0
+    n = len(text)
+    lowered = text.lower()
+    while True:
+        start = lowered.find("<at", i)
+        if start == -1:
+            break
+        after = text[start + 3 : start + 4]
+        # Require a tag boundary after "<at" (space / ">" / "/"), else it's not
+        # an <at> opener (e.g. "<atlas>"); advance past it.
+        if after and not (after.isspace() or after in (">", "/")):
+            i = start + 3
+            continue
+        gt = text.find(">", start + 3)
+        if gt == -1:
+            break  # no more complete tags
+        close = lowered.find(_AT_CLOSE, gt + 1)
+        if close == -1:
+            i = start + 3  # unclosed opener — skip it, keep scanning forward
+            continue
+        end = close + len(_AT_CLOSE)
+        spans.append((start, end))
+        i = end
+    return spans
 
 
 def _protect_cut(cut: int, start: int, n: int, spans: list) -> int:

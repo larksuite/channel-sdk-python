@@ -18,7 +18,13 @@ import pytest
 from lark_channel.channel.config import BotLoopGuardConfig, PolicyConfig, TextBatchConfig
 from lark_channel.channel.safety import SafetyPipeline
 from lark_channel.channel.safety.loop_guard import LoopGuard
-from lark_channel.channel.types import Conversation, Identity, InboundMessage, TextContent
+from lark_channel.channel.types import (
+    Conversation,
+    Identity,
+    InboundMessage,
+    Mention,
+    TextContent,
+)
 
 
 def _msg(mid, t, *, chat="c1", sender="ou_bot", sender_type="bot", mentioned_bot=True):
@@ -182,6 +188,67 @@ def test_out_of_order_stale_event_does_not_join_future_window():
     guard = _guard(window_ms=1000, max_bot_mentions=2)
     assert guard.record(_msg("m_future", 100000)) is False  # count 1
     assert guard.record(_msg("m_stale", 0)) is False        # outside window, not counted
+
+
+def test_reset_on_human_chat_scope():
+    guard = _guard(window_ms=60000, max_bot_mentions=2, scope="chat")
+    assert guard.record(_msg("m1", 0)) is False  # count 1
+    guard.reset_on_human(_msg("h", 10, sender_type="user", mentioned_bot=False))
+    assert guard.record(_msg("m2", 20)) is False  # restarted at 1, not tripped
+
+
+def test_reset_on_human_clears_all_bot_keys_in_chat_plus_sender():
+    guard = _guard(window_ms=60000, max_bot_mentions=2, scope="chat+sender")
+    assert guard.record(_msg("m1", 0, sender="ou_botA")) is False
+    # A human (different sender key) must still clear the bot's counter.
+    guard.reset_on_human(
+        _msg("h", 10, sender="ou_human", sender_type="user", mentioned_bot=False)
+    )
+    assert guard.record(_msg("m2", 20, sender="ou_botA")) is False
+
+
+def _bot_at_me(mid):
+    m = _msg(mid, int(time.time() * 1000), chat="c_reset", sender="ou_peer")
+    m.mentions = [Mention(key="@_1", open_id="ou_bot")]
+    return m
+
+
+def _human_plain(mid):
+    return _msg(
+        mid, int(time.time() * 1000), chat="c_reset",
+        sender="ou_human", sender_type="user", mentioned_bot=False,
+    )
+
+
+async def test_pipeline_human_message_resets_guard_before_policy():
+    # require_mention=True → a plain human message is policy-rejected, yet it
+    # must still reset the guard (reset runs before the policy gate), so a
+    # subsequent bot @-mention doesn't trip.
+    loop = asyncio.get_running_loop()
+    delivered, rejects = [], []
+    pipe = SafetyPipeline(
+        loop=loop,
+        on_message=lambda m: delivered.append(m.id),
+        on_reject=lambda r: rejects.append(r),
+        policy=PolicyConfig(
+            require_mention=True,
+            bot_loop_guard=BotLoopGuardConfig(
+                enabled=True, max_bot_mentions=2, window_ms=60_000, on_trip="reject"
+            ),
+        ),
+        batch_config=TextBatchConfig(delay_ms=0),
+    )
+    pipe.set_bot_open_id("ou_bot")
+
+    await pipe.push_message(_bot_at_me("b1"))
+    await asyncio.sleep(0.02)
+    await pipe.push_message(_human_plain("h1"))  # policy-rejected, but resets guard
+    await asyncio.sleep(0.02)
+    await pipe.push_message(_bot_at_me("b2"))
+    await asyncio.sleep(0.02)
+
+    assert not any(r.reason == "bot_loop" for r in rejects)  # reset prevented the trip
+    assert "b2" in delivered
 
 
 async def test_pipeline_update_policy_reconfigures_loop_guard():

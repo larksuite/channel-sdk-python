@@ -1,45 +1,43 @@
 """Per-chat roster cache backing bot-at-bot name resolution.
 
-Consumers: `get_chat_members` (source ``'api'``, authoritative users),
+Consumers: `get_chat_members` (source ``'api'`` users, per ``id_type``),
 `get_chat_bots` (source ``'api'`` bots), inbound-mention collection (source
 ``'mention'``, short-lived, can carry bots), ``sender_name`` resolution and
 ``@name → open_id`` normalization.
 
-Design (rebuilt-from-sources):
+Design (rebuilt-from-sources, thread-safe):
 
-- Each chat keeps at most one authoritative **users** snapshot and one **bots**
-  snapshot (from the API), plus short-lived **mention** observations. The
-  name↔open_id indices are rebuilt from these live sources on every read, so a
-  full API refresh that drops a member (or resolves a name collision) is
-  reflected immediately — no stale merge.
-- The users snapshot records the ``id_type`` it was fetched with and whether it
-  was ``complete``. Only ``open_id``-typed members feed the name→open_id index
-  (a ``user_id``/``union_id`` is not usable in an ``<at>``), and ``get_members``
-  is keyed by ``id_type`` so a ``user_id`` query never satisfies an ``open_id``
-  one.
+- Each chat keeps authoritative **users** snapshots **keyed by id_type**, one
+  **bots** snapshot, plus short-lived **mention** observations. The name↔open_id
+  indices are rebuilt from these live sources on every read, so a full API
+  refresh that drops a member (or resolves a name collision) is reflected
+  immediately.
+- Only a **complete**, ``open_id``-typed users snapshot (and the bots snapshot)
+  feeds the ``name → open_id`` index — a truncated roster is never treated as an
+  authoritative full membership, and a ``user_id``/``union_id`` snapshot never
+  contributes (its ids aren't usable in an ``<at>``). ``get_members`` is keyed
+  by ``id_type`` so a ``user_id`` query never returns an ``open_id`` snapshot.
+- On a complete API refresh the matching-category mention observations that the
+  snapshot doesn't contain are dropped (a departed/renamed member can't be
+  resurrected by a stale observation), and any observation for an open_id the
+  API already knows is ignored (the API name/mapping is authoritative).
 
-Two safety invariants:
-
-- A display name mapping to more than one open_id is **ambiguous** and resolves
-  to ``None`` — never last-writer-wins. An ``'api'`` name→open_id is never
-  overwritten by a ``'mention'`` one.
-- Snapshots/observations expire after a TTL and the number of cached chats is
-  capped, so stale or poisoned mappings don't linger.
-
-Clock, TTL and capacity are injectable for deterministic tests. Modelled on
-:class:`~lark_channel.channel.chat_mode.ChatModeCache`.
+Two safety invariants: a name mapping to more than one open_id is **ambiguous**
+→ ``None`` (never mis-@); snapshots/observations expire after a TTL and the
+number of chats is capped. Reads return defensive copies so callers can't mutate
+the cached fact source. Clock/TTL/capacity are injectable for deterministic tests.
 """
 
+import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .types import ChatMember
 
 MemberSource = str  # "api" | "mention"
 
-# Sentinel for a display name shared by more than one open_id — unresolvable.
 _AMBIGUOUS = object()
 
 DEFAULT_TTL_SECONDS = 300.0
@@ -57,10 +55,10 @@ class _Snapshot:
 
 @dataclass
 class _Roster:
-    api_users: Optional[_Snapshot] = None
+    api_users: Dict[str, _Snapshot] = field(default_factory=dict)  # keyed by id_type
     api_bots: Optional[_Snapshot] = None
-    # open_id -> (name, observed_at); short-lived, never overrides an api name.
-    mentions: "OrderedDict[str, Tuple[str, float]]" = field(default_factory=OrderedDict)
+    # open_id -> (name, observed_at, is_bot); short-lived, never overrides api.
+    mentions: "OrderedDict[str, Tuple[str, float, bool]]" = field(default_factory=OrderedDict)
     updated_at: float = 0.0
 
 
@@ -76,13 +74,14 @@ class ChatMemberCache:
     ) -> None:
         self._now = now
         self._ttl = ttl_seconds
-        # Mention observations are best-effort and attacker-influenceable, so
-        # they get their own (by default equal, optionally shorter) TTL and
-        # never extend the authoritative API snapshot's lifetime.
         self._mention_ttl = mention_ttl_seconds if mention_ttl_seconds is not None else ttl_seconds
         self._max_chats = max_chats
         self._max_entries = max_entries_per_chat
         self._chats: "OrderedDict[str, _Roster]" = OrderedDict()
+        # Guards the whole read-modify-write of a roster so concurrent inbound
+        # (background loop) and public API / send calls (possibly other threads)
+        # can't lose updates or read a half-rebuilt index.
+        self._lock = threading.Lock()
 
     # ---- writes --------------------------------------------------------------
 
@@ -95,60 +94,71 @@ class ChatMemberCache:
         id_type: str = "open_id",
         complete: bool = True,
     ) -> None:
-        roster = self._roster_for_write(chat_id)
-        now = self._now()
-        if source == "api":
-            # Authoritative snapshot: replaces the previous users snapshot, so a
-            # departed member / resolved collision is dropped on the next read.
-            roster.api_users = _Snapshot(list(members), id_type, complete, now)
-        else:
-            for m in members:
-                if not m.id or not m.name:
-                    continue
-                roster.mentions.pop(m.id, None)
-                roster.mentions[m.id] = (m.name, now)
-            self._cap(roster.mentions)
-        roster.updated_at = now
-        self._store(chat_id, roster)
+        with self._lock:
+            roster = self._roster_for_write(chat_id)
+            now = self._now()
+            if source == "api":
+                prev = roster.api_users.get(id_type)
+                # Don't let a truncated refresh clobber a complete snapshot.
+                if complete or prev is None or not prev.complete:
+                    roster.api_users[id_type] = _Snapshot(list(members), id_type, complete, now)
+                if complete and id_type == "open_id":
+                    self._reconcile_mentions(roster, {m.id for m in members}, want_bot=False)
+            else:
+                for m in members:
+                    if not m.id or not m.name:
+                        continue
+                    roster.mentions.pop(m.id, None)
+                    roster.mentions[m.id] = (m.name, now, bool(m.is_bot))
+                self._cap(roster.mentions)
+            roster.updated_at = now
+            self._store(chat_id, roster)
 
     def set_bots(self, chat_id: str, bots: List[ChatMember], *, complete: bool = True) -> None:
-        """Cache an authoritative bot list (from ``get_chat_bots``) — separate
-        from the user snapshot so neither clobbers the other."""
-        roster = self._roster_for_write(chat_id)
-        now = self._now()
-        roster.api_bots = _Snapshot(list(bots), "open_id", complete, now)
-        roster.updated_at = now
-        self._store(chat_id, roster)
+        with self._lock:
+            roster = self._roster_for_write(chat_id)
+            now = self._now()
+            roster.api_bots = _Snapshot(list(bots), "open_id", complete, now)
+            if complete:
+                self._reconcile_mentions(roster, {b.id for b in bots}, want_bot=True)
+            roster.updated_at = now
+            self._store(chat_id, roster)
+
+    def _reconcile_mentions(self, roster: _Roster, snapshot_ids: set, want_bot: bool) -> None:
+        """Drop same-category mention observations the authoritative snapshot
+        doesn't contain (they left / were renamed), so a complete refresh can
+        negate stale observations instead of them being resurrected."""
+        for open_id in list(roster.mentions):
+            _name, _ts, is_bot = roster.mentions[open_id]
+            if is_bot == want_bot and open_id not in snapshot_ids:
+                del roster.mentions[open_id]
 
     # ---- reads ---------------------------------------------------------------
 
     def get_members(self, chat_id: str, id_type: str = "open_id") -> Optional[List[ChatMember]]:
-        """The last API user list for ``id_type``, or ``None`` when absent,
-        fetched with a different ``id_type``, or expired."""
-        snap = self._live_snapshot(chat_id, "users")
-        if snap is None or snap.id_type != id_type:
-            return None
-        return snap.members
+        with self._lock:
+            snap = self._live_users(chat_id, id_type)
+            return [replace(m) for m in snap.members] if snap is not None else None
 
     def get_bots(self, chat_id: str) -> Optional[List[ChatMember]]:
-        snap = self._live_snapshot(chat_id, "bots")
-        return snap.members if snap is not None else None
+        with self._lock:
+            snap = self._live_bots(chat_id)
+            return [replace(m) for m in snap.members] if snap is not None else None
 
     def resolve_name(self, chat_id: str, open_id: str) -> Optional[str]:
-        by_open_id, _ = self._index(chat_id)
-        return by_open_id.get(open_id)
+        with self._lock:
+            by_open_id, _ = self._index(chat_id)
+            return by_open_id.get(open_id)
 
     def resolve_open_id(self, chat_id: str, name: str) -> Optional[str]:
-        _, by_name = self._index(chat_id)
-        target = by_name.get(name)
-        return target if isinstance(target, str) else None
+        with self._lock:
+            _, by_name = self._index(chat_id)
+            target = by_name.get(name)
+            return target if isinstance(target, str) else None
 
-    # ---- internals -----------------------------------------------------------
+    # ---- internals (call under self._lock) -----------------------------------
 
     def _index(self, chat_id: str) -> Tuple[Dict[str, str], Dict[str, object]]:
-        """Rebuild the name↔open_id indices from the chat's currently-live
-        sources. API sources (open_id-typed users + bots) are authoritative;
-        mention observations only add non-conflicting entries."""
         roster = self._live_roster(chat_id)
         by_open_id: Dict[str, str] = {}
         by_name: Dict[str, object] = {}
@@ -177,36 +187,44 @@ class ChatMemberCache:
                 by_name[name] = _AMBIGUOUS
 
         now = self._now()
-        # Pass 1: authoritative API members. Only open_id-typed user snapshots
-        # feed the index (a user_id/union_id can't be used in an <at>); bots are
-        # always open_id.
-        if roster.api_users and roster.api_users.id_type == "open_id":
-            if now - roster.api_users.fetched_at <= self._ttl:
-                for m in roster.api_users.members:
-                    if m.id and m.name:
-                        register(m.id, m.name, True)
-        if roster.api_bots and now - roster.api_bots.fetched_at <= self._ttl:
-            for m in roster.api_bots.members:
+        # Only a complete, open_id-typed users snapshot feeds the name index.
+        su = roster.api_users.get("open_id")
+        if su and su.complete and now - su.fetched_at <= self._ttl:
+            for m in su.members:
                 if m.id and m.name:
                     register(m.id, m.name, True)
-        # Pass 2: short-lived mention observations (never overwrite an api name).
-        for open_id, (name, ts) in list(roster.mentions.items()):
+        sb = roster.api_bots
+        if sb and sb.complete and now - sb.fetched_at <= self._ttl:
+            for m in sb.members:
+                if m.id and m.name:
+                    register(m.id, m.name, True)
+        # Short-lived mention observations: ignore any open_id the API already
+        # knows (api authoritative), and expire stale ones.
+        for open_id, (name, ts, _is_bot) in list(roster.mentions.items()):
             if now - ts > self._mention_ttl:
                 roster.mentions.pop(open_id, None)
+                continue
+            if open_id in api_ids:
                 continue
             register(open_id, name, False)
         return by_open_id, by_name
 
-    def _live_snapshot(self, chat_id: str, kind: str) -> Optional[_Snapshot]:
+    def _live_users(self, chat_id: str, id_type: str) -> Optional[_Snapshot]:
         roster = self._live_roster(chat_id)
         if roster is None:
             return None
-        snap = roster.api_users if kind == "users" else roster.api_bots
-        if snap is None:
-            return None
-        if self._now() - snap.fetched_at > self._ttl:
+        snap = roster.api_users.get(id_type)
+        if snap is None or self._now() - snap.fetched_at > self._ttl:
             return None
         return snap
+
+    def _live_bots(self, chat_id: str) -> Optional[_Snapshot]:
+        roster = self._live_roster(chat_id)
+        if roster is None or roster.api_bots is None:
+            return None
+        if self._now() - roster.api_bots.fetched_at > self._ttl:
+            return None
+        return roster.api_bots
 
     def _roster_for_write(self, chat_id: str) -> _Roster:
         return self._live_roster(chat_id) or _Roster(updated_at=self._now())

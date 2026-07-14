@@ -24,6 +24,7 @@ from ..types import (
     ReplyRef,
     TextContent,
 )
+from .converters.post import convert_body as post_convert_body
 from .dedup import Deduper
 from .flatten import flatten
 from .interactive import fetch_interactive
@@ -310,13 +311,22 @@ class InboundPipeline:
         safe_flat_text = _safe_content_text(flat_text)
         content_text = safe_flat_text if self._cfg.security.strict_content_text else flat_text
 
-        # `body_text`: content_text with the CURRENT bot's own @-mention removed
-        # (placeholder-precise). content_text above keeps the rendered mention,
-        # so callers that don't read body_text see unchanged default behavior.
-        if strip_bot and primary_raw_text is not None:
-            body_raw = resolve_mentions(
-                primary_raw_text, ext, strip_bot_mentions=True, bot_open_id=self._bot_open_id
-            )
+        # `body_text`: content_text with the CURRENT bot's own @-mention removed.
+        # content_text above keeps the rendered mention, so callers that don't
+        # read body_text see unchanged default behavior. Text uses a
+        # placeholder-precise strip; post drops the bot's <at> node at the AST
+        # level (preserving title / formatting / other mentions).
+        body_raw = None
+        if strip_bot:
+            if isinstance(content, PostContent):
+                body_raw = resolve_mentions(
+                    post_convert_body(content, self._bot_open_id), ext
+                )
+            elif isinstance(content, TextContent) and primary_raw_text is not None:
+                body_raw = resolve_mentions(
+                    primary_raw_text, ext, strip_bot_mentions=True, bot_open_id=self._bot_open_id
+                )
+        if body_raw is not None:
             body_safe = _safe_content_text(body_raw)
             body_text = body_safe if self._cfg.security.strict_content_text else body_raw
         else:
