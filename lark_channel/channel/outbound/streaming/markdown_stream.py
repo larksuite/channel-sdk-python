@@ -54,6 +54,7 @@ class MarkdownStreamController:
         min_chars: int = 50,
         initial_text: str = INITIAL_TEXT,
         element_id: str = ELEMENT_ID,
+        delta_only: bool = False,
     ) -> None:
         self._to = to
         self._rit = receive_id_type
@@ -66,6 +67,10 @@ class MarkdownStreamController:
         self._finish_streaming_card = finish_streaming_card
         self._initial_text = initial_text
         self._element_id = element_id
+        # Pure-delta producers (each chunk is brand-new text) must not have
+        # their chunks reinterpreted as rewinds/overlaps — that silently drops
+        # characters (issue #9). Opt in via delta_only=True.
+        self._delta_only = delta_only
 
         self._card_id: Optional[str] = None
         self._message_id: str = ""
@@ -92,7 +97,7 @@ class MarkdownStreamController:
         if not chunk:
             return
         await self._ensure_started()
-        new_content = merge_streaming_text(self._content, chunk)
+        new_content = merge_streaming_text(self._content, chunk, delta_only=self._delta_only)
         delta = len(new_content) - len(self._content)
         self._content = new_content
         self._throttle.note(max(1, delta))

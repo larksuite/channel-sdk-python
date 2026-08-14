@@ -14,14 +14,24 @@ Different streaming producers yield text in different ways:
         return prev
     # else: compute the largest suffix of prev that is also a prefix of next,
     # drop that prefix from next, and concatenate.
+
+For **pure-delta** producers none of the heuristics apply — a chunk that
+happens to be a prefix of the accumulated text (e.g. the next digit `4` after
+`40`, or a repeated trailing `0`) is brand-new content, not a rewind or an
+overlap. Passing ``delta_only=True`` makes the merge a plain concatenation so
+characters are never dropped (issue #9).
 """
 
 
-def merge_streaming_text(prev: str, chunk: str) -> str:
+def merge_streaming_text(prev: str, chunk: str, *, delta_only: bool = False) -> str:
     if not chunk:
         return prev
     if not prev:
         return chunk
+    if delta_only:
+        # Pure-delta producers: every chunk is brand-new text. Treating it
+        # as a rewind or an overlap would silently drop characters.
+        return prev + chunk
     if chunk.startswith(prev):
         return chunk
     if prev.startswith(chunk):
