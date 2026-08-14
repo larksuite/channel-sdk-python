@@ -39,7 +39,7 @@ async def test_ws_compat_allows_insecure_endpoint_and_audits(monkeypatch):
         lambda: "ws://example.test/callback?device_id=device&service_id=42",
     )
     monkeypatch.setattr(ws_client.websockets, "connect", fake_connect)
-    monkeypatch.setattr(ws_client, "loop", SimpleNamespace(create_task=close_task))
+    monkeypatch.setattr(client, "_create_task", close_task)
 
     await client._connect()
 
@@ -72,7 +72,7 @@ async def test_ws_default_compat_allows_insecure_endpoint_without_audit_warning(
         lambda: "ws://example.test/callback?device_id=device&service_id=42",
     )
     monkeypatch.setattr(ws_client.websockets, "connect", fake_connect)
-    monkeypatch.setattr(ws_client, "loop", SimpleNamespace(create_task=close_task))
+    monkeypatch.setattr(client, "_create_task", close_task)
 
     with caplog.at_level(logging.WARNING, logger="Lark"):
         await client._connect()
@@ -133,7 +133,7 @@ async def test_ws_strict_allow_insecure_endpoint_records_allow_action(monkeypatc
         lambda: "ws://example.test/callback?device_id=device&service_id=42",
     )
     monkeypatch.setattr(ws_client.websockets, "connect", fake_connect)
-    monkeypatch.setattr(ws_client, "loop", SimpleNamespace(create_task=close_task))
+    monkeypatch.setattr(client, "_create_task", close_task)
 
     await client._connect()
 
@@ -164,7 +164,7 @@ async def test_ws_strict_allows_local_insecure_endpoint_by_default(monkeypatch):
         lambda: "ws://127.0.0.1/callback?device_id=device&service_id=42",
     )
     monkeypatch.setattr(ws_client.websockets, "connect", fake_connect)
-    monkeypatch.setattr(ws_client, "loop", SimpleNamespace(create_task=close_task))
+    monkeypatch.setattr(client, "_create_task", close_task)
 
     await client._connect()
 
@@ -271,7 +271,6 @@ async def test_ws_max_concurrent_handlers_limits_active_message_tasks(monkeypatc
     async def noop_disconnect(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(ws_client, "loop", asyncio.get_running_loop())
     monkeypatch.setattr(client, "_handle_message", fake_handle_message)
     monkeypatch.setattr(client, "_disconnect", noop_disconnect)
 

@@ -99,8 +99,8 @@ async def test_connect_disables_websockets_15_automatic_proxy(monkeypatch):
     )
     monkeypatch.setattr(ws_client.websockets, "connect", fake_connect)
     monkeypatch.setattr(
-        ws_client.loop,
-        "create_task",
+        client,
+        "_create_task",
         lambda coro: coro.close() if hasattr(coro, "close") else None,
     )
 
@@ -129,8 +129,8 @@ async def test_connect_does_not_pass_proxy_to_older_websockets(monkeypatch):
     )
     monkeypatch.setattr(ws_client.websockets, "connect", fake_connect)
     monkeypatch.setattr(
-        ws_client.loop,
-        "create_task",
+        client,
+        "_create_task",
         lambda coro: coro.close() if hasattr(coro, "close") else None,
     )
 

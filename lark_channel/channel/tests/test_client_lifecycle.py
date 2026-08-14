@@ -57,6 +57,24 @@ def test_start_passes_handshake_timeout_to_ws_client():
     assert calls["kwargs"]["handshake_timeout"] == 4.0
 
 
+def test_private_ws_shutdown_uses_the_client_instance_loop():
+    c = _client()
+    ws_loop = asyncio.new_event_loop()
+    disconnected = []
+
+    class _PrivateWS:
+        _loop = ws_loop
+
+        async def _disconnect(self):
+            disconnected.append(True)
+
+    c._ws_client = _PrivateWS()
+    c.stop()
+
+    assert disconnected == [True]
+    ws_loop.close()
+
+
 def test_connection_snapshot_initial_state():
     c = _client()
 
