@@ -82,11 +82,7 @@ async def test_ws_connect_omits_open_timeout_by_default(monkeypatch):
     client = ws_client.Client(app_id="cli_x", app_secret="s")
     monkeypatch.setattr(client, "_get_conn_url", conn_url)
     monkeypatch.setattr(ws_client.websockets, "connect", fake_connect)
-    monkeypatch.setattr(
-        ws_client,
-        "loop",
-        SimpleNamespace(create_task=close_task),
-    )
+    monkeypatch.setattr(client, "_create_task", close_task)
 
     await client._connect()
 
@@ -118,11 +114,7 @@ async def test_ws_connect_passes_configured_open_timeout(monkeypatch):
     )
     monkeypatch.setattr(client, "_get_conn_url", conn_url)
     monkeypatch.setattr(ws_client.websockets, "connect", fake_connect)
-    monkeypatch.setattr(
-        ws_client,
-        "loop",
-        SimpleNamespace(create_task=close_task),
-    )
+    monkeypatch.setattr(client, "_create_task", close_task)
 
     await client._connect()
 

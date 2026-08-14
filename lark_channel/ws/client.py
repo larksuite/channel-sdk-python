@@ -37,13 +37,6 @@ if TYPE_CHECKING:
     from lark_channel.channel.config import SecurityConfig
 
 
-try:
-    loop = asyncio.get_event_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-
 def _get_by_key(headers: RepeatedCompositeFieldContainer, key: str) -> str:
     for header in headers:
         if header.key == key:
@@ -195,7 +188,7 @@ class Client(object):
         self._conn_url: str = ""
         self._service_id: str = ""
         self._conn_id: str = ""
-        self._loop = loop
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._reconnect_task = None
         # Local defaults; the Feishu WS endpoint authoritatively replaces these
         # via _configure() on every handshake (and may push updates mid-session
@@ -223,21 +216,29 @@ class Client(object):
         logger.setLevel(log_level.value)
 
     def start(self) -> None:
+        # ``start`` is a blocking API and is commonly run in an executor
+        # thread.  A private loop keeps this client independent from whichever
+        # loop happened to be active when the module or instance was created.
+        self._set_loop(asyncio.new_event_loop())
+        asyncio.set_event_loop(self._loop)
         try:
-            loop.run_until_complete(self._connect())
-        except ClientException as e:
-            logger.error(self._fmt_log("connect failed, err: {}", e))
-            raise e
-        except Exception as e:
-            logger.error(self._fmt_log("connect failed, err: {}", e))
-            if self._auto_reconnect:
-                loop.run_until_complete(self._disconnect_and_reconnect())
-            else:
-                loop.run_until_complete(self._disconnect())
+            try:
+                self._loop.run_until_complete(self._connect())
+            except ClientException as e:
+                logger.error(self._fmt_log("connect failed, err: {}", e))
                 raise e
+            except Exception as e:
+                logger.error(self._fmt_log("connect failed, err: {}", e))
+                if self._auto_reconnect:
+                    self._loop.run_until_complete(self._disconnect_and_reconnect())
+                else:
+                    self._loop.run_until_complete(self._disconnect())
+                    raise e
 
-        loop.create_task(self._ping_loop())
-        loop.run_until_complete(_select())
+            self._loop.create_task(self._ping_loop())
+            self._loop.run_until_complete(_select())
+        finally:
+            self._close_loop()
 
     async def _ping_loop(self):
         while True:
@@ -276,7 +277,7 @@ class Client(object):
                 self._service_id = service_id
 
                 logger.info(self._fmt_log("connected to {}", conn_url))
-                loop.create_task(self._receive_message_loop(conn))
+                self._create_task(self._receive_message_loop(conn))
             except InvalidHandshake as e:
                 _parse_ws_conn_exception(e)
 
@@ -295,10 +296,10 @@ class Client(object):
 
     async def _schedule_handle_message(self, msg) -> None:
         if self._handler_semaphore is None:
-            loop.create_task(self._handle_message(msg))
+            self._create_task(self._handle_message(msg))
             return
         await self._handler_semaphore.acquire()
-        loop.create_task(self._handle_message_with_limit(msg))
+        self._create_task(self._handle_message_with_limit(msg))
 
     async def _handle_message_with_limit(self, msg) -> None:
         try:
@@ -380,7 +381,26 @@ class Client(object):
 
     def _set_loop(self, loop_) -> None:
         self._loop = loop_
+        self._cache.bind_loop(loop_)
         self._reconnect_task = None
+
+    def _create_task(self, coro):
+        return asyncio.get_running_loop().create_task(coro)
+
+    def _close_loop(self) -> None:
+        loop_ = self._loop
+        if loop_ is None or loop_.is_closed() or loop_.is_running():
+            return
+        self._cache.close()
+        pending = asyncio.all_tasks(loop_)
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop_.run_until_complete(
+                asyncio.gather(*pending, return_exceptions=True)
+            )
+        asyncio.set_event_loop(None)
+        loop_.close()
 
     def probe_endpoint(self, *, timeout: float) -> bool:
         try:
