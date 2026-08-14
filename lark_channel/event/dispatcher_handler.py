@@ -1,4 +1,3 @@
-import hashlib
 import hmac
 import json
 import logging
@@ -73,6 +72,10 @@ from .security import (
     build_error_response_content,
     should_record_security_audit,
 )
+from lark_channel.core.webhook_signature import (
+    ReplayGuard,
+    verify_webhook_signature,
+)
 
 if TYPE_CHECKING:
     from lark_channel.channel.config import SecurityConfig
@@ -85,6 +88,7 @@ class EventDispatcherHandler(HttpHandler):
         self._encrypt_key: Optional[str] = None
         self._verification_token: Optional[str] = None
         self._security = security or _default_security_config()
+        self._replay_guard_instance: Optional[ReplayGuard] = None
 
     def do(self, req: RawRequest) -> RawResponse:
         if logger.isEnabledFor(logging.DEBUG):
@@ -243,14 +247,25 @@ class EventDispatcherHandler(HttpHandler):
         )
 
     def _verify_sign(self, request: RawRequest) -> None:
-        if self._encrypt_key is None or self._encrypt_key == "":
-            return
-        timestamp = request.headers.get(LARK_REQUEST_TIMESTAMP)
-        nonce = request.headers.get(LARK_REQUEST_NONCE)
-        signature = request.headers.get(LARK_REQUEST_SIGNATURE)
-        bs = (timestamp + nonce + self._encrypt_key).encode(UTF_8) + request.body
-        if signature != hashlib.sha256(bs).hexdigest():
-            raise AccessDeniedException("signature verification failed")
+        verify_webhook_signature(
+            request,
+            secret=self._encrypt_key,
+            algorithm="sha256",
+            security=self._security,
+            record_audit=lambda reason, action: self._record_security_audit(
+                reason, action=action, request=request
+            ),
+            warn=lambda msg: logger.warning("%s", msg),
+            replay_guard=self._replay_guard(),
+        )
+
+    def _replay_guard(self) -> Optional[ReplayGuard]:
+        ttl = self._security.replay_protection_seconds
+        if ttl is None:
+            return None
+        if self._replay_guard_instance is None:
+            self._replay_guard_instance = ReplayGuard(ttl)
+        return self._replay_guard_instance
 
     def _parse_context(self, plaintext: str) -> EventContext:
         context = JSON.unmarshal(plaintext, EventContext)

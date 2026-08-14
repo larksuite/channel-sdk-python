@@ -416,6 +416,12 @@ class SecurityConfig:
     max_ws_fragment_bytes: Optional[int] = None
     max_concurrent_ws_handlers: Optional[int] = None
     resource_overflow_policy: ResourceOverflowPolicy = "audit"
+    # Webhook signature hardening (issue #11). Both are opt-in: when unset,
+    # legacy behaviour is preserved (timestamps are not checked, no replay
+    # dedup). When set, violations are audited (and warned) in compat/audit
+    # mode and rejected in strict mode.
+    max_timestamp_skew_seconds: Optional[int] = None
+    replay_protection_seconds: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.mode not in ("compat", "audit", "strict"):
@@ -441,6 +447,8 @@ class SecurityConfig:
             "max_ws_fragment_parts",
             "max_ws_fragment_bytes",
             "max_concurrent_ws_handlers",
+            "max_timestamp_skew_seconds",
+            "replay_protection_seconds",
         ):
             value = getattr(self, field_name)
             if value is not None and (
