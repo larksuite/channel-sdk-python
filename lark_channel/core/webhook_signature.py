@@ -74,6 +74,26 @@ def _timestamp_age_seconds(timestamp: Optional[str]) -> Optional[float]:
     return abs(time.time() - ts)
 
 
+def _get_header(headers, name: str) -> Optional[str]:
+    """Case-insensitive header lookup.
+
+    ASGI servers (Starlette/FastAPI per the ASGI spec) hand the application
+    lowercase header names, so a case-sensitive ``headers.get("X-Lark-...")``
+    returns ``None`` and the signature computation crashes with a TypeError
+    (issue #12). Normalize on both sides for robustness.
+    """
+    if not headers:
+        return None
+    value = headers.get(name)
+    if value is not None:
+        return value
+    lower = name.lower()
+    for key, val in headers.items():
+        if str(key).lower() == lower:
+            return val
+    return None
+
+
 def verify_webhook_signature(
     request,
     *,
@@ -93,9 +113,9 @@ def verify_webhook_signature(
     plain signature mismatches (``webhook.signature_invalid`` /
     ``card.signature_invalid``) as before.
     """
-    timestamp = request.headers.get(LARK_REQUEST_TIMESTAMP)
-    nonce = request.headers.get(LARK_REQUEST_NONCE)
-    signature = request.headers.get(LARK_REQUEST_SIGNATURE)
+    timestamp = _get_header(request.headers, LARK_REQUEST_TIMESTAMP)
+    nonce = _get_header(request.headers, LARK_REQUEST_NONCE)
+    signature = _get_header(request.headers, LARK_REQUEST_SIGNATURE)
     has_signature_headers = bool(timestamp and nonce and signature)
 
     if not secret:

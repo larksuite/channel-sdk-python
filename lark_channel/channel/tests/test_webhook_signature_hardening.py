@@ -213,6 +213,30 @@ def test_fresh_timestamp_passes_with_skew_enabled():
     assert REASON_WEBHOOK_TIMESTAMP_STALE not in _reasons(recorder)
 
 
+def test_lowercase_signature_headers_are_verified():
+    """ASGI servers lowercase header names (issue #12): the hardened verifier
+    must find the signature headers case-insensitively, not crash with a
+    TypeError from None + None + secret."""
+    seen = []
+    body = json.dumps(_plain_event()).encode("utf-8")
+    headers = _signed_headers(body, "encrypt-key")
+    lowercase = {k.lower(): v for k, v in headers.items()}
+    handler = (
+        EventDispatcherHandler.builder(
+            "encrypt-key",
+            "verification-token",
+            security=SecurityConfig(mode="strict"),
+        )
+        .register_p2_customized_event("example.event", lambda event: seen.append(event))
+        .build()
+    )
+
+    resp = handler.do(_request(body, lowercase))
+
+    assert resp.status_code == 200
+    assert len(seen) == 1
+
+
 # ---------------------------------------------------------------------------
 # Replay protection (opt-in)
 # ---------------------------------------------------------------------------
