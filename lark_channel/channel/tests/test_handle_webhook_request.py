@@ -223,6 +223,33 @@ def test_card_callback_with_signature_header_does_not_require_verification_token
     assert len(seen) == 1
 
 
+def test_signed_card_accepts_lowercase_asgi_headers():
+    """ASGI servers (Starlette/FastAPI) hand handlers lowercase header
+    names; a legitimately signed plaintext card callback must not 500."""
+    seen = []
+    body = json.dumps(
+        {
+            "type": "card.action.trigger",
+            "action": {"value": {"key": "value"}},
+        }
+    ).encode("utf-8")
+    handler = (
+        CardActionHandler.builder("", "verification-token")
+        .register(lambda card: seen.append(card))
+        .build()
+    )
+    headers = {
+        key.lower(): value
+        for key, value in _signed_headers(body, "verification-token", algorithm="sha1").items()
+    }
+
+    resp = handler.do(_request_bytes(body, headers))
+
+    assert resp.status_code == 200
+    assert resp.content == b'{"msg":"success"}'
+    assert len(seen) == 1
+
+
 def test_signed_encrypted_event_is_verified_before_dispatch():
     seen = []
     body = _encrypted_body(
