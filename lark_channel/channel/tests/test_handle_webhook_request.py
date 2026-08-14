@@ -286,7 +286,13 @@ def test_strict_event_invalid_signature_rejects_before_decrypt(monkeypatch):
 
 def test_strict_event_missing_signature_non_handshake_rejects():
     """A non-handshake body must stay blocked even though the SDK now
-    peeks at decrypted content to check for a url_verification exemption."""
+    peeks at decrypted content to check for a url_verification exemption.
+
+    Registers a processor and asserts it is never invoked, so an
+    implementation that merely logs the missing-signature reason while
+    still letting the request through would fail this test, not just
+    one that returns the wrong status code."""
+    seen = []
     recorder = InMemorySecurityAuditRecorder()
     body = _encrypted_body(
         {
@@ -299,16 +305,21 @@ def test_strict_event_missing_signature_non_handshake_rejects():
         },
         "encrypt-key",
     )
-    handler = EventDispatcherHandler.builder(
-        "encrypt-key",
-        "verification-token",
-        security=SecurityConfig(mode="strict", audit_recorder=recorder),
-    ).build()
+    handler = (
+        EventDispatcherHandler.builder(
+            "encrypt-key",
+            "verification-token",
+            security=SecurityConfig(mode="strict", audit_recorder=recorder),
+        )
+        .register_p2_customized_event("example.event", lambda event: seen.append(event))
+        .build()
+    )
 
     resp = handler.do(_request_bytes(body, {}))
 
     assert resp.status_code == 500
     assert json.loads(resp.content) == {"code": 500, "msg": "internal error"}
+    assert len(seen) == 0
     assert [event.reason for event in recorder.events] == [
         REASON_WEBHOOK_SIGNATURE_MISSING
     ]
@@ -532,7 +543,13 @@ def test_strict_card_invalid_signature_rejects_before_decrypt(monkeypatch):
 def test_strict_card_missing_signature_non_handshake_rejects():
     """A non-handshake card callback must stay blocked even though the
     SDK now peeks at decrypted content to check for a url_verification
-    exemption."""
+    exemption.
+
+    Registers a processor and asserts it is never invoked, so an
+    implementation that merely logs the missing-signature reason while
+    still letting the request through would fail this test, not just
+    one that returns the wrong status code."""
+    seen = []
     recorder = InMemorySecurityAuditRecorder()
     body = _encrypted_body(
         {
@@ -541,16 +558,21 @@ def test_strict_card_missing_signature_non_handshake_rejects():
         },
         "encrypt-key",
     )
-    handler = CardActionHandler.builder(
-        "encrypt-key",
-        "verification-token",
-        security=SecurityConfig(mode="strict", audit_recorder=recorder),
-    ).build()
+    handler = (
+        CardActionHandler.builder(
+            "encrypt-key",
+            "verification-token",
+            security=SecurityConfig(mode="strict", audit_recorder=recorder),
+        )
+        .register(lambda card: seen.append(card))
+        .build()
+    )
 
     resp = handler.do(_request_bytes(body, {}))
 
     assert resp.status_code == 500
     assert json.loads(resp.content) == {"code": 500, "msg": "internal error"}
+    assert len(seen) == 0
     assert [event.reason for event in recorder.events] == [
         REASON_CARD_SIGNATURE_MISSING
     ]
