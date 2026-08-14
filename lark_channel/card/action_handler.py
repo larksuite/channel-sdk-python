@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import json
 import logging
-from typing import Optional, Callable, Any, TYPE_CHECKING
+from typing import Optional, Callable, Any, Dict, TYPE_CHECKING
 
 from lark_channel.core.const import *
 from lark_channel.core.enum import LogLevel
@@ -179,9 +179,9 @@ class CardActionHandler(HttpHandler):
 
     def _has_signature_headers(self, request: RawRequest) -> bool:
         return (
-            Strings.is_not_empty(request.headers.get(LARK_REQUEST_TIMESTAMP))
-            and Strings.is_not_empty(request.headers.get(LARK_REQUEST_NONCE))
-            and Strings.is_not_empty(request.headers.get(LARK_REQUEST_SIGNATURE))
+            Strings.is_not_empty(_get_header(request.headers, LARK_REQUEST_TIMESTAMP))
+            and Strings.is_not_empty(_get_header(request.headers, LARK_REQUEST_NONCE))
+            and Strings.is_not_empty(_get_header(request.headers, LARK_REQUEST_SIGNATURE))
         )
 
     def _record_security_audit(
@@ -206,9 +206,9 @@ class CardActionHandler(HttpHandler):
     def _verify_sign(self, request: RawRequest) -> None:
         if self._verification_token is None or self._verification_token == "":
             return
-        timestamp = request.headers.get(LARK_REQUEST_TIMESTAMP)
-        nonce = request.headers.get(LARK_REQUEST_NONCE)
-        signature = request.headers.get(LARK_REQUEST_SIGNATURE)
+        timestamp = _get_header(request.headers, LARK_REQUEST_TIMESTAMP)
+        nonce = _get_header(request.headers, LARK_REQUEST_NONCE)
+        signature = _get_header(request.headers, LARK_REQUEST_SIGNATURE)
         bs = (timestamp + nonce + self._verification_token).encode(UTF_8) + request.body
         h = hashlib.sha1(bs)
         if signature != h.hexdigest():
@@ -260,3 +260,16 @@ def _default_security_config():
     from lark_channel.channel.config import SecurityConfig
 
     return SecurityConfig()
+
+
+def _get_header(headers: Dict[str, str], name: str) -> Optional[str]:
+    # ASGI servers (Starlette/FastAPI) hand handlers lowercase header names,
+    # so an exact-case lookup silently misses X-Lark-* signature headers.
+    value = headers.get(name)
+    if value is not None:
+        return value
+    lname = name.lower()
+    for key, val in headers.items():
+        if key.lower() == lname:
+            return val
+    return None
