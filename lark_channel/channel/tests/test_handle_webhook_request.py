@@ -284,12 +284,44 @@ def test_strict_event_invalid_signature_rejects_before_decrypt(monkeypatch):
     ]
 
 
-def test_strict_event_missing_signature_rejects_before_decrypt(monkeypatch):
+def test_strict_event_missing_signature_non_handshake_rejects():
+    """A non-handshake body must stay blocked even though the SDK now
+    peeks at decrypted content to check for a url_verification exemption."""
+    recorder = InMemorySecurityAuditRecorder()
+    body = _encrypted_body(
+        {
+            "schema": "2.0",
+            "header": {
+                "event_type": "example.event",
+                "token": "verification-token",
+            },
+            "event": {"value": "ok"},
+        },
+        "encrypt-key",
+    )
+    handler = EventDispatcherHandler.builder(
+        "encrypt-key",
+        "verification-token",
+        security=SecurityConfig(mode="strict", audit_recorder=recorder),
+    ).build()
+
+    resp = handler.do(_request_bytes(body, {}))
+
+    assert resp.status_code == 500
+    assert json.loads(resp.content) == {"code": 500, "msg": "internal error"}
+    assert [event.reason for event in recorder.events] == [
+        REASON_WEBHOOK_SIGNATURE_MISSING
+    ]
+
+
+def test_strict_event_missing_signature_undecryptable_body_rejects(monkeypatch):
+    """If the url_verification-exemption peek itself can't decrypt the
+    body, the request must still be rejected, not silently let through."""
     recorder = InMemorySecurityAuditRecorder()
     body = _encrypted_body({"type": "url_verification"}, "encrypt-key")
 
     def fail_decrypt(*_args, **_kwargs):
-        raise AssertionError("decrypt should not run")
+        raise AssertionError("decrypt failed")
 
     monkeypatch.setattr(
         "lark_channel.event.dispatcher_handler.AESCipher.decrypt_str",
@@ -308,6 +340,31 @@ def test_strict_event_missing_signature_rejects_before_decrypt(monkeypatch):
     assert [event.reason for event in recorder.events] == [
         REASON_WEBHOOK_SIGNATURE_MISSING
     ]
+
+
+def test_strict_event_unsigned_encrypted_url_verification_handshake_is_exempted():
+    """Regression test for the first-time webhook setup deadlock: the
+    Feishu console's "save request URL" challenge is encrypted but never
+    signed, so strict mode must not block it before the url_verification
+    branch gets a chance to answer it."""
+    body = _encrypted_body(
+        {
+            "type": "url_verification",
+            "challenge": "challenge-code",
+            "token": "verification-token",
+        },
+        "encrypt-key",
+    )
+    handler = EventDispatcherHandler.builder(
+        "encrypt-key",
+        "verification-token",
+        security=SecurityConfig(mode="strict"),
+    ).build()
+
+    resp = handler.do(_request_bytes(body, {}))
+
+    assert resp.status_code == 200
+    assert json.loads(resp.content) == {"challenge": "challenge-code"}
 
 
 def test_strict_event_unsigned_encrypted_allow_records_allow_action():
@@ -472,12 +529,41 @@ def test_strict_card_invalid_signature_rejects_before_decrypt(monkeypatch):
     ]
 
 
-def test_strict_card_missing_signature_rejects_before_decrypt(monkeypatch):
+def test_strict_card_missing_signature_non_handshake_rejects():
+    """A non-handshake card callback must stay blocked even though the
+    SDK now peeks at decrypted content to check for a url_verification
+    exemption."""
+    recorder = InMemorySecurityAuditRecorder()
+    body = _encrypted_body(
+        {
+            "type": "card.action.trigger",
+            "action": {"value": {"key": "value"}},
+        },
+        "encrypt-key",
+    )
+    handler = CardActionHandler.builder(
+        "encrypt-key",
+        "verification-token",
+        security=SecurityConfig(mode="strict", audit_recorder=recorder),
+    ).build()
+
+    resp = handler.do(_request_bytes(body, {}))
+
+    assert resp.status_code == 500
+    assert json.loads(resp.content) == {"code": 500, "msg": "internal error"}
+    assert [event.reason for event in recorder.events] == [
+        REASON_CARD_SIGNATURE_MISSING
+    ]
+
+
+def test_strict_card_missing_signature_undecryptable_body_rejects(monkeypatch):
+    """If the url_verification-exemption peek itself can't decrypt the
+    body, the request must still be rejected, not silently let through."""
     recorder = InMemorySecurityAuditRecorder()
     body = _encrypted_body({"type": "card.action.trigger"}, "encrypt-key")
 
     def fail_decrypt(*_args, **_kwargs):
-        raise AssertionError("decrypt should not run")
+        raise AssertionError("decrypt failed")
 
     monkeypatch.setattr(
         "lark_channel.card.action_handler.AESCipher.decrypt_str",
@@ -496,6 +582,31 @@ def test_strict_card_missing_signature_rejects_before_decrypt(monkeypatch):
     assert [event.reason for event in recorder.events] == [
         REASON_CARD_SIGNATURE_MISSING
     ]
+
+
+def test_strict_card_unsigned_encrypted_url_verification_handshake_is_exempted():
+    """Regression test for the first-time webhook setup deadlock on the
+    card callback URL: the challenge is encrypted but never signed, so
+    strict mode must not block it before the url_verification branch
+    gets a chance to answer it."""
+    body = _encrypted_body(
+        {
+            "type": "url_verification",
+            "challenge": "challenge-code",
+            "token": "verification-token",
+        },
+        "encrypt-key",
+    )
+    handler = CardActionHandler.builder(
+        "encrypt-key",
+        "verification-token",
+        security=SecurityConfig(mode="strict"),
+    ).build()
+
+    resp = handler.do(_request_bytes(body, {}))
+
+    assert resp.status_code == 200
+    assert json.loads(resp.content) == {"challenge": "challenge-code"}
 
 
 def test_strict_card_unsigned_encrypted_allow_records_allow_action():

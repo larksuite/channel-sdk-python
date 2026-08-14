@@ -187,6 +187,12 @@ class EventDispatcherHandler(HttpHandler):
         if Strings.is_empty(self._encrypt_key):
             return False
         if not self._has_signature_headers(request):
+            if self._is_url_verification_handshake(request):
+                # The Feishu console's "save request URL" challenge is not
+                # signed (platform behavior); it carries verification_token
+                # as its own proof, checked below in do() like any other
+                # event, so it does not need to pass signature pre-verify.
+                return True
             action = "legacy_flow"
             if self._security.is_strict:
                 action = (
@@ -222,6 +228,13 @@ class EventDispatcherHandler(HttpHandler):
             and Strings.is_not_empty(request.headers.get(LARK_REQUEST_NONCE))
             and Strings.is_not_empty(request.headers.get(LARK_REQUEST_SIGNATURE))
         )
+
+    def _is_url_verification_handshake(self, request: RawRequest) -> bool:
+        try:
+            context = self._parse_context(self._decrypt(request.body))
+        except Exception:
+            return False
+        return URL_VERIFICATION == context.type
 
     def _record_security_audit(
         self,
