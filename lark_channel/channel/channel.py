@@ -1445,6 +1445,19 @@ class FeishuChannel:
         b = b.register_p2_customized_event(
             "drive.notice.comment_add_v1", self._on_p1_comment_add
         )
+        # Lifecycle events WishForge needs but the typed SDK processors are
+        # not registered by default: message recall, chat disband, user leave.
+        # Mirror the comment_add pattern so each wire event reaches a typed
+        # ``channel.on(...)`` handler instead of "processor not found".
+        b = b.register_p2_customized_event(
+            "im.message.recalled_v1", self._on_p2_message_recalled
+        )
+        b = b.register_p2_customized_event(
+            "im.chat.disbanded_v1", self._on_p2_chat_disbanded
+        )
+        b = b.register_p2_customized_event(
+            "im.chat.member.user.deleted_v1", self._on_p2_user_deleted
+        )
         return b.build()
 
     # ------------------------------------------------------------------
@@ -1474,6 +1487,15 @@ class FeishuChannel:
 
     def _on_p2_bot_deleted(self, data: Any) -> None:
         self.schedule(self._handle_bot_event(data, joined=False))
+
+    def _on_p2_message_recalled(self, data: Any) -> None:
+        self.schedule(self._handle_message_recalled_event(data))
+
+    def _on_p2_chat_disbanded(self, data: Any) -> None:
+        self.schedule(self._handle_chat_disbanded_event(data))
+
+    def _on_p2_user_deleted(self, data: Any) -> None:
+        self.schedule(self._handle_user_deleted_event(data))
 
     def _on_p2_message_read(self, data: Any) -> None:
         self.schedule(self._handle_message_read_event(data))
@@ -1776,6 +1798,72 @@ class FeishuChannel:
             )
         except Exception as e:
             logger.exception("FeishuChannel messageRead dispatch failed: %s", e)
+
+    async def _handle_message_recalled_event(self, data: Any) -> None:
+        try:
+            await self._emit_raw_event(data)
+            event = getattr(data, "event", None) or {}
+            await self._invoke(
+                "messageRecalled",
+                {
+                    "message_id": getattr(event, "message_id", None) or "",
+                    "chat_id": getattr(event, "chat_id", None) or "",
+                    "recall_time": getattr(event, "recall_time", None) or "",
+                    "recall_type": getattr(event, "recall_type", None) or "",
+                    "raw": _coerce.obj_to_dict(data) or {},
+                },
+            )
+        except Exception as e:
+            logger.exception("FeishuChannel messageRecalled dispatch failed: %s", e)
+
+    async def _handle_chat_disbanded_event(self, data: Any) -> None:
+        try:
+            await self._emit_raw_event(data)
+            event = getattr(data, "event", None) or {}
+            await self._invoke(
+                "chatDisbanded",
+                {
+                    "chat_id": getattr(event, "chat_id", None) or "",
+                    "operator_open_id": self._user_open_id(
+                        getattr(event, "operator_id", None)
+                    ),
+                    "name": getattr(event, "name", None) or "",
+                    "raw": _coerce.obj_to_dict(data) or {},
+                },
+            )
+        except Exception as e:
+            logger.exception("FeishuChannel chatDisbanded dispatch failed: %s", e)
+
+    async def _handle_user_deleted_event(self, data: Any) -> None:
+        try:
+            await self._emit_raw_event(data)
+            event = getattr(data, "event", None) or {}
+            users = getattr(event, "users", None) or []
+            await self._invoke(
+                "userDeleted",
+                {
+                    "chat_id": getattr(event, "chat_id", None) or "",
+                    "operator_open_id": self._user_open_id(
+                        getattr(event, "operator_id", None)
+                    ),
+                    "user_open_ids": [
+                        self._user_open_id(getattr(user, "user_id", None))
+                        for user in users
+                    ],
+                    "raw": _coerce.obj_to_dict(data) or {},
+                },
+            )
+        except Exception as e:
+            logger.exception("FeishuChannel userDeleted dispatch failed: %s", e)
+
+    @staticmethod
+    def _user_open_id(value: Any) -> str:
+        """Best-effort open_id extraction from a ``UserId`` model or dict."""
+        if value is None:
+            return ""
+        if isinstance(value, dict):
+            return str(value.get("open_id") or "")
+        return str(getattr(value, "open_id", None) or "")
 
     async def _handle_comment_event(self, data: Any) -> None:
         try:

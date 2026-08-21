@@ -48,6 +48,9 @@ VALID_EVENTS = {
     "bot_added", "botAdded",
     "bot_left", "botLeave", "bot_leave",
     "message_read", "messageRead",
+    "message_recalled", "messageRecalled",
+    "chat_disbanded", "chatDisbanded",
+    "user_deleted", "userDeleted",
     "reject",
     "comment",
     "raw", "raw_event",
@@ -64,6 +67,9 @@ _EVENT_ALIASES = {
     "bot_left": "botLeave",
     "bot_leave": "botLeave",
     "message_read": "messageRead",
+    "message_recalled": "messageRecalled",
+    "chat_disbanded": "chatDisbanded",
+    "user_deleted": "userDeleted",
     "raw_event": "raw",
 }
 

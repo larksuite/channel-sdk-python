@@ -15,6 +15,11 @@ from lark_channel.channel.safety import RejectEvent
 from lark_channel.api.im.v1.model.p2_im_message_reaction_created_v1 import (
     P2ImMessageReactionCreatedV1,
 )
+from lark_channel.api.im.v1.model.p2_im_message_recalled_v1 import P2ImMessageRecalledV1
+from lark_channel.api.im.v1.model.p2_im_chat_disbanded_v1 import P2ImChatDisbandedV1
+from lark_channel.api.im.v1.model.p2_im_chat_member_user_deleted_v1 import (
+    P2ImChatMemberUserDeletedV1,
+)
 from lark_channel.channel.types import CardActionPayload
 from lark_channel.event.callback.model.p2_card_action_trigger import P2CardActionTrigger
 
@@ -247,6 +252,67 @@ async def test_handle_message_read_event_dispatches():
     assert len(got) == 1
     assert got[0].message_ids == ["om_1", "om_2"]
     assert got[0].reader.open_id == "ou_reader"
+
+
+# ---- lifecycle events (customized p2 registrations) ---------------------
+
+
+@pytest.mark.asyncio
+async def test_handle_message_recalled_event_dispatches():
+    c = _client()
+    got = []
+    c.on("messageRecalled", lambda event: got.append(event))
+    data = P2ImMessageRecalledV1(
+        {
+            "event": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "recall_time": "1700000000000",
+                "recall_type": "initiator",
+            }
+        }
+    )
+    await c._handle_message_recalled_event(data)
+    assert len(got) == 1
+    assert got[0]["message_id"] == "om_1"
+    assert got[0]["chat_id"] == "oc_1"
+
+
+@pytest.mark.asyncio
+async def test_handle_chat_disbanded_event_dispatches():
+    c = _client()
+    got = []
+    c.on("chatDisbanded", lambda event: got.append(event))
+    data = P2ImChatDisbandedV1({"event": {"chat_id": "oc_1"}})
+    await c._handle_chat_disbanded_event(data)
+    assert len(got) == 1
+    assert got[0]["chat_id"] == "oc_1"
+
+
+@pytest.mark.asyncio
+async def test_handle_user_deleted_event_dispatches():
+    c = _client()
+    got = []
+    c.on("userDeleted", lambda event: got.append(event))
+    data = P2ImChatMemberUserDeletedV1(
+        {
+            "event": {
+                "chat_id": "oc_1",
+                "users": [{"user_id": {"open_id": "ou_1"}}],
+            }
+        }
+    )
+    await c._handle_user_deleted_event(data)
+    assert len(got) == 1
+    assert got[0]["user_open_ids"] == ["ou_1"]
+
+
+@pytest.mark.asyncio
+async def test_handle_lifecycle_events_no_handler_noop():
+    c = _client()
+    await c._handle_message_recalled_event(P2ImMessageRecalledV1({}))
+    await c._handle_chat_disbanded_event(P2ImChatDisbandedV1({}))
+    await c._handle_user_deleted_event(P2ImChatMemberUserDeletedV1({}))  # no raise
 
 
 # ---- require_user_auth error paths --------------------------------------

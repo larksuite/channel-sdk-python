@@ -437,7 +437,7 @@ def test_resolve_bot_identity_persists_to_safety_pipeline(monkeypatch):
 
 
 def test_build_dispatcher_registers_required_events():
-    """Dispatcher should have processors for all 5 event types we handle."""
+    """Dispatcher should have processors for all event types we handle."""
     c = _client()
     c._ensure_bg_loop()
     dispatcher = c._build_dispatcher()
@@ -451,6 +451,9 @@ def test_build_dispatcher_registers_required_events():
         "p2.im.chat.member.bot.added_v1",
         "p2.im.chat.member.bot.deleted_v1",
         "p2.im.message.message_read_v1",
+        "p2.im.message.recalled_v1",
+        "p2.im.chat.disbanded_v1",
+        "p2.im.chat.member.user.deleted_v1",
         # drive comment-add has no typed SDK processor and the wire
         # payload may arrive under either schema (p1 callback envelope vs
         # p2 WS envelope). Register both so neither path logs

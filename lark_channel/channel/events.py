@@ -35,6 +35,9 @@ ChannelEventName = Literal[
     "botAdded",
     "botLeave",
     "messageRead",
+    "messageRecalled",
+    "chatDisbanded",
+    "userDeleted",
     "reject",
     "comment",
     "raw",
@@ -60,6 +63,9 @@ class Events:
     BOT_ADDED = "botAdded"
     BOT_LEAVE = "botLeave"
     MESSAGE_READ = "messageRead"
+    MESSAGE_RECALLED = "messageRecalled"
+    CHAT_DISBANDED = "chatDisbanded"
+    USER_DELETED = "userDeleted"
     REJECT = "reject"
     COMMENT = "comment"
     RAW = "raw"
