@@ -40,6 +40,8 @@ import time
 from collections import OrderedDict
 from typing import Optional, Protocol, runtime_checkable
 
+from lark_channel.core.log import logger
+
 
 @runtime_checkable
 class DedupStore(Protocol):
@@ -113,10 +115,18 @@ class Deduper:
         if event_id:
             k1 = make_event_key(account_id, event_id)
             if self._store.seen(k1):
+                logger.warning(
+                    "dedupe hit: account=%s event=%s message=%s (skipped)",
+                    account_id, event_id, message_id,
+                )
                 return False
         if message_id:
             k2 = make_message_key(account_id, message_id)
             if self._store.seen(k2):
+                logger.warning(
+                    "dedupe hit: account=%s event=%s message=%s (skipped)",
+                    account_id, event_id, message_id,
+                )
                 return False
         if event_id:
             self._store.mark(make_event_key(account_id, event_id), self._ttl)

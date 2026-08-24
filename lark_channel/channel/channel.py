@@ -1589,7 +1589,7 @@ class FeishuChannel:
     def _emit_reject(self, event: RejectEvent) -> None:
         handlers = self._handlers.get("reject")
         if not handlers:
-            logger.debug(
+            logger.warning(
                 "policy reject message=%s reason=%s", event.message_id, event.reason
             )
             return
