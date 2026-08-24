@@ -173,6 +173,7 @@ async def test_keepalive_disabled_does_not_probe():
         config=KeepaliveConfig(enabled=False, check_interval_seconds=0.01),
         probe=lambda: calls.append("probe") or True,
         reconnect=lambda: calls.append("reconnect"),
+        last_activity=lambda: 0.0,
         clock=lambda: 0.0,
     )
     await watchdog.run_once()
@@ -181,7 +182,6 @@ async def test_keepalive_disabled_does_not_probe():
 
 @pytest.mark.asyncio
 async def test_keepalive_reconnects_after_wake_probe_failures():
-    times = iter([0.0, 200.0, 400.0])
     calls = []
     watchdog = KeepaliveWatchdog(
         config=KeepaliveConfig(
@@ -192,7 +192,8 @@ async def test_keepalive_reconnects_after_wake_probe_failures():
         ),
         probe=lambda: False,
         reconnect=lambda: calls.append("reconnect"),
-        clock=lambda: next(times),
+        last_activity=lambda: 100.0,  # idle 900s（clock=1000）
+        clock=lambda: 1_000.0,
     )
     await watchdog.run_once()
     await watchdog.run_once()

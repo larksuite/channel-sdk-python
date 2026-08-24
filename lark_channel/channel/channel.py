@@ -117,6 +117,7 @@ from .types import (
     CommentTarget,
     ConnectionSnapshot,
     EventOperator,
+    InboundMessage,
     MediaSource,
     MessageReadEvent,
     OutboundCard,
@@ -3048,7 +3049,7 @@ class FeishuChannel:
         按 content.mentions 中是否出现当前 bot 的 open_id 判定；bot 身份未知时
         保守为 False（群内非话题消息会被 mention 门控拦截，fail-closed）。
         """
-        from .types import Conversation, Identity, InboundMessage
+        from .types import Conversation, Identity
 
         msg = _normalize_fetched_message_item(item)
         chat_id = msg.get("chat_id") or ""
