@@ -3041,6 +3041,57 @@ class FeishuChannel:
         message = _normalize_fetched_message_item(item)
         return await self._pipeline.normalize(message_event=message, sender=sender)
 
+    def inbound_from_api_item(self, item: Dict[str, Any]) -> InboundMessage:
+        """把 ``im/v1/messages`` 列表项归一化为 InboundMessage（补拉对账用）。
+
+        ``chat_type`` 按 chat_id 前缀判定（oc_=群 / ou_=单聊）；``mentioned_bot``
+        按 content.mentions 中是否出现当前 bot 的 open_id 判定；bot 身份未知时
+        保守为 False（群内非话题消息会被 mention 门控拦截，fail-closed）。
+        """
+        from .types import Conversation, Identity, InboundMessage
+
+        msg = _normalize_fetched_message_item(item)
+        chat_id = msg.get("chat_id") or ""
+        chat_type = (
+            "group"
+            if chat_id.startswith("oc_")
+            else "p2p"
+            if chat_id.startswith("ou_")
+            else "unknown"
+        )
+        sender = _extract_fetched_sender(msg) or {}
+        sender_ids = sender.get("sender_id") or {}
+        sender_type = sender.get("sender_type") or "user"
+        content = msg.get("content")
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except Exception:  # noqa: BLE001 — 解析失败按纯文本处理
+                content = {}
+        if not isinstance(content, dict):
+            content = {}
+        text = content.get("text") or ""
+        bot = self.bot_identity
+        bot_open_id = bot.open_id if bot is not None else None
+        mentioned_bot = False
+        for mention in content.get("mentions") or []:
+            if bot_open_id and (mention.get("id") or {}).get("open_id") == bot_open_id:
+                mentioned_bot = True
+                break
+        return InboundMessage(
+            id=msg.get("message_id") or "",
+            create_time=int(msg.get("create_time") or 0),
+            conversation=Conversation(chat_id=chat_id, chat_type=chat_type),
+            sender=Identity(
+                open_id=sender_ids.get("open_id") or "",
+                is_bot=sender_type in ("bot", "app"),
+                sender_type=sender_type,
+            ),
+            content_text=text,
+            mentioned_bot=mentioned_bot,
+            raw=msg,
+        )
+
     async def fetch_quoted_context(self, message_id: str):
         resolver = QuoteResolver(
             fetcher=lambda mid: _api_helpers.fetch_message_raw(
