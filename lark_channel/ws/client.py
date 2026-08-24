@@ -196,6 +196,7 @@ class Client(object):
         self._service_id: str = ""
         self._conn_id: str = ""
         self._last_activity_at: float = 0.0
+        self._pong_waiter: Optional[asyncio.Future[bool]] = None
         self._loop = loop
         self._reconnect_task = None
         # Local defaults; the Feishu WS endpoint authoritatively replaces these
@@ -227,6 +228,27 @@ class Client(object):
     def last_activity_at(self) -> float:
         """最近一次收到任意 WS 帧的 monotonic 时间戳；0 表示尚未收到。"""
         return self._last_activity_at
+
+    async def probe_live(self, *, timeout: float) -> bool:
+        """True 当 ping/pong 往返在 timeout 内完成；连接缺失/超时返回 False。"""
+        if self._conn is None:
+            return False
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[bool] = loop.create_future()
+        self._pong_waiter = fut
+        try:
+            frame = _new_ping_frame(int(self._service_id))
+            await self._write_message(frame.SerializeToString())
+            await asyncio.wait_for(asyncio.shield(fut), timeout)
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(self._fmt_log("probe_live timed out after %ss", timeout))
+            return False
+        except Exception as e:  # noqa: BLE001 — probe 必须失败闭合
+            logger.warning(self._fmt_log("probe_live failed, err: {}", e))
+            return False
+        finally:
+            self._pong_waiter = None
 
     def start(self) -> None:
         try:
@@ -442,6 +464,9 @@ class Client(object):
             return
         elif message_type == MessageType.PONG:
             logger.debug(self._fmt_log("receive pong"))
+            waiter = self._pong_waiter
+            if waiter is not None and not waiter.done():
+                waiter.set_result(True)
             if not frame.payload:
                 return
             conf = JSON.unmarshal(str(frame.payload, UTF_8), ClientConfig)

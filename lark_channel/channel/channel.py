@@ -1178,8 +1178,9 @@ class FeishuChannel:
             return
         self._keepalive_watchdog = KeepaliveWatchdog(
             config=keepalive_cfg,
-            probe=lambda: ws.probe_endpoint(timeout=keepalive_cfg.probe_timeout_seconds),
+            probe=lambda: ws.probe_live(timeout=keepalive_cfg.probe_timeout_seconds),
             reconnect=lambda: ws.request_reconnect(),
+            last_activity=lambda: ws.last_activity_at,
         )
         self._keepalive_future = self.schedule(self._keepalive_loop())
 
