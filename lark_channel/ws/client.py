@@ -195,6 +195,7 @@ class Client(object):
         self._conn_url: str = ""
         self._service_id: str = ""
         self._conn_id: str = ""
+        self._last_activity_at: float = 0.0
         self._loop = loop
         self._reconnect_task = None
         # Local defaults; the Feishu WS endpoint authoritatively replaces these
@@ -221,6 +222,11 @@ class Client(object):
         self.on_reconnecting: Callable[[], None] = lambda: None
         self.on_reconnected: Callable[[], None] = lambda: None
         logger.setLevel(log_level.value)
+
+    @property
+    def last_activity_at(self) -> float:
+        """最近一次收到任意 WS 帧的 monotonic 时间戳；0 表示尚未收到。"""
+        return self._last_activity_at
 
     def start(self) -> None:
         try:
@@ -427,6 +433,7 @@ class Client(object):
             logger.error(self._fmt_log("handle message failed, err: {}", e))
 
     async def _handle_control_frame(self, frame: Frame):
+        self._last_activity_at = time.monotonic()
         hs = frame.headers
         type_ = _get_by_key(hs, HEADER_TYPE)
         message_type = MessageType(type_)
@@ -441,6 +448,7 @@ class Client(object):
             self._configure(conf)
 
     async def _handle_data_frame(self, frame: Frame):
+        self._last_activity_at = time.monotonic()
         hs = frame.headers
         msg_id = _get_by_key(hs, HEADER_MESSAGE_ID)
         trace_id = _get_by_key(hs, HEADER_TRACE_ID)
@@ -456,8 +464,8 @@ class Client(object):
                 return
 
         message_type = MessageType(type_)
-        logger.debug(self._fmt_log("receive message, message_type: {}, message_id: {}, trace_id: {}, payload_len: {}",
-                                   message_type.value, msg_id, trace_id, len(pl)))
+        logger.info(self._fmt_log("receive message, message_type: {}, message_id: {}, trace_id: {}, payload_len: {}",
+                                  message_type.value, msg_id, trace_id, len(pl)))
 
         resp = Response(code=http.HTTPStatus.OK)
         try:
