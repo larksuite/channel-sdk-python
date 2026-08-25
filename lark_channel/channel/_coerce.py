@@ -51,6 +51,7 @@ VALID_EVENTS = {
     "reject",
     "comment",
     "raw", "raw_event",
+    "meetingInvited", "meeting_invited",
     "reconnecting",
     "reconnected",
     "error",
@@ -65,6 +66,7 @@ _EVENT_ALIASES = {
     "bot_leave": "botLeave",
     "message_read": "messageRead",
     "raw_event": "raw",
+    "meeting_invited": "meetingInvited",
 }
 
 

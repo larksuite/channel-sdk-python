@@ -287,3 +287,28 @@ async def test_ws_max_concurrent_handlers_limits_active_message_tasks(monkeypatc
         await task
     assert started == ["message-1", "message-2"]
     assert max_active == 1
+
+
+def test_a_client_can_be_built_from_a_thread_with_no_event_loop():
+    """Construction must not require the calling thread to already have a loop.
+
+    On 3.8/3.9 `asyncio.Lock()` and `asyncio.Semaphore()` resolve a loop at
+    construction, and `__init__` builds three of them. That requirement was met
+    by accident for a long time: `ExpiringCache.__init__`, the line above, looked
+    up a loop for its own background task and installed one when there was none.
+    Nothing in the suite pinned it, so removing that task turned "you may build a
+    client anywhere" into a `RuntimeError` on 3.9 only — invisible on 3.10+.
+    """
+    previous = None
+    try:
+        previous = asyncio.get_event_loop()
+    except RuntimeError:
+        pass
+    asyncio.set_event_loop(None)
+    try:
+        client = ws_client.Client(app_id="cli_test", app_secret="secret")
+        assert client is not None
+    finally:
+        # Restore what was there: leaving the thread without a loop would fail
+        # every later test that builds one of these, which is this bug again.
+        asyncio.set_event_loop(previous)

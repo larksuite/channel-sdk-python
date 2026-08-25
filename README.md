@@ -47,8 +47,10 @@ asyncio.run(channel.connect())
 - [Webhook server adapter](docs/webhook-server.md)
 - [CardKit streaming](docs/cardkit-streaming.md)
 - [Deduplication architecture](docs/dedup-architecture.md)
+- [Meeting channel](docs/meeting-channel.md) — agents that perceive and respond inside a live meeting
 - [Release notes](docs/release-notes/v1.1.0.md)
 - [Echo bot sample](samples/channel/echo_bot.py)
+- [Meeting samples](samples/channel/) — [join a meeting](samples/channel/meeting_join_bot.py), [follow one without joining](samples/channel/meeting_follow_agenda.py)
 
 ## Migration from `lark_oapi.channel`
 
@@ -68,6 +70,45 @@ your application needs the full OpenAPI SDK surface.
 
 See the [migration guide](docs/migration-from-lark-oapi.md) for import mapping,
 runtime compatibility notes, and a migration checklist.
+
+## Meeting Channel
+
+Agents that perceive and respond **inside a live meeting** — captions, meeting
+chat, participants, shared documents. Two entry points, one session type.
+
+```python
+# The bot joins as a real participant and can speak into the meeting.
+channel.on("meetingInvited", lambda inv: channel.join_meeting(inv.meeting_no))
+
+# Or follow the meeting a user is already in, without joining it.
+session = await channel.follow_my_meeting(user_open_id="ou_...")
+
+session.on("transcript", lambda e: notes.append(e.text))
+session.on("chat", on_chat)
+await session.send_message("noted")   # joined sessions only
+await session.leave()
+```
+
+Three things to know before you start:
+
+- **The bot's own in-meeting messages come back to it.** So a meeting-chat
+  handler needs `if event.self_echo: return`, or the bot spends the meeting
+  replying to itself at network speed.
+- **Disconnecting does not take the bot out of the meeting.** `disconnect()`
+  closes the event channel; the bot stays a participant, which is what makes
+  reconnects safe. A process that is really exiting should `leave()` each
+  session first.
+- **`follow_my_meeting` reads what every participant says, and the bot is not
+  in the participant list.** Two more things: the `user_open_id` you pass has
+  to be somebody you have already established is the requester — the SDK
+  receives a string and cannot check that for you — and what the user grants
+  in one go is
+  **every** scope your app applied for, not just the meeting read. See
+  [Security configuration](docs/security.md#meeting-channel).
+
+For event ordering, how captions settle from interim to final, how many
+sessions can run at once, and what to check when nothing arrives, see
+[Meeting channel](docs/meeting-channel.md).
 
 ## Security Mode
 

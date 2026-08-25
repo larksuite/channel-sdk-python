@@ -8,7 +8,7 @@ import lark_channel.api as api_root
 
 ROOT = Path(__file__).resolve().parents[2]
 
-ALLOWED_API_ROOTS = {"im", "contact", "cardkit", "drive", "wiki"}
+ALLOWED_API_ROOTS = {"im", "contact", "cardkit", "drive", "wiki", "vc"}
 
 DIRECT_API_MODULES = {
     "lark_channel.api.cardkit.v1.model.content_card_element_request",
@@ -19,6 +19,7 @@ DIRECT_API_MODULES = {
     "lark_channel.api.cardkit.v1.model.settings_card_request_body",
     "lark_channel.api.contact.v3.model.batch_user_request",
     "lark_channel.api.drive.comment",
+    "lark_channel.api.vc.bot",
     "lark_channel.api.im.v1.model.create_file_request",
     "lark_channel.api.im.v1.model.create_file_request_body",
     "lark_channel.api.im.v1.model.create_file_response",
@@ -73,7 +74,7 @@ def test_required_direct_api_modules_import():
 
 def test_non_channel_api_roots_are_not_packaged():
     api_path = Path(api_root.__file__).resolve().parent
-    for name in ("calendar", "bitable", "drive_full", "docx", "vc", "admin"):
+    for name in ("calendar", "bitable", "drive_full", "docx", "admin"):
         assert not (api_path / name).exists(), name
 
 

@@ -245,3 +245,5 @@ lark_channel/api/im/v1/resource/message_resource.py
 lark_channel/api/im/v1/version.py
 lark_channel/api/wiki/__init__.py
 lark_channel/api/wiki/node.py
+lark_channel/api/vc/__init__.py
+lark_channel/api/vc/bot.py

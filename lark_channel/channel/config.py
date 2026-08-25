@@ -488,6 +488,96 @@ def _security_audit_recorder_default():
 
 
 @dataclass
+class MeetingChannelConfig:
+    """Meeting-channel knobs.
+
+    Session creation is triggered from **outside** the application — joining
+    starts at an invitation from anybody who can add the bot to a meeting, and
+    following typically starts at an inbound instruction. Both therefore need a
+    ceiling and a reclamation story, and neither is optional.
+    """
+
+    #: Concurrent meeting sessions allowed. Over the ceiling ``join_meeting``
+    #: and ``follow_my_meeting`` raise ``too_many_sessions`` **without**
+    #: calling the platform. The reading covers live local sessions plus
+    #: meetings the bot has joined and not yet left, deduplicated by meeting.
+    max_concurrent_sessions: int = 32
+
+    #: Reclaim a ``tat`` session after this long with no in-meeting activity:
+    #: end it, **depart the meeting**, and give the seat back. ``0.0``
+    #: disables it, which is the default because the liveness probe already
+    #: catches the bot being removed, and probe backfill keeps resetting this
+    #: clock while the bot really is present. What is left for idle
+    #: reclamation is a meeting where nobody is talking — departing there is a
+    #: visible and wrong move.
+    #:
+    #: Idle reclamation doubles as the only backstop for a wedged handler. With
+    #: it off there is none, so applications whose handlers may block for a
+    #: long time should set a positive value.
+    idle_timeout_seconds: float = 0.0
+
+    #: How often to confirm the bot is still in the meeting. Covers the cases
+    #: that produce no meeting-ended event at all: removed by a host, meeting
+    #: transferred. ``0`` disables.
+    liveness_probe_interval_seconds: float = 300.0
+
+    #: Default transcript settle window, in seconds, for sessions that do not
+    #: pass their own :class:`~.meeting.MeetingOptions`. ``0.0`` delivers every
+    #: revision of a sentence; a positive value delivers each sentence once,
+    #: after it stops changing for that long.
+    stabilize_seconds: float = 0.0
+
+    #: Per-session ceiling on in-meeting messages, per minute. Over it,
+    #: ``send_message`` raises ``rate_limited``. Guards against a self-echo
+    #: feedback loop turning into in-meeting flooding at network speed.
+    send_rate_limit_per_minute: int = 20
+
+    #: ``follow_my_meeting`` empty-poll backoff: first interval and its ceiling.
+    poll_min_interval_seconds: float = 3.0
+    poll_max_interval_seconds: float = 10.0
+    #: ``follow_my_meeting`` failure backoff ceiling. Counted separately from
+    #: empty polls: a failing token must not keep retrying on that cadence.
+    poll_failure_max_interval_seconds: float = 60.0
+    #: Consecutive failures after which the event source gives up.
+    poll_max_consecutive_failures: int = 10
+    #: ``follow_my_meeting``, how often to re-check the meeting is still active.
+    active_meeting_check_interval_seconds: float = 30.0
+
+    #: Upper bound on waiting for the delivery queue to drain during
+    #: reclamation. Past it the queue is cancelled and a warning is logged.
+    #: Seat return and unregistration never wait for this — otherwise one
+    #: wedged handler would burn a seat permanently.
+    dispose_drain_timeout_seconds: float = 5.0
+
+    #: Fallback deadline on a membership entry, in seconds. Reaching it means
+    #: our accounting is wrong; releasing the seat beats locking the process
+    #: out. Two hours rather than a full day because the cost of holding is
+    #: that both entry points stop working.
+    membership_max_age_seconds: float = 7200.0
+    #: Minimum gap between two reconciliation attempts on the same entry.
+    #: Reconciliation is lazy — driven by admission, by arriving evidence, and
+    #: by ``connect()`` — not by a timer, so this throttles rather than
+    #: schedules. ``0`` disables reconciliation, leaving only the deadline.
+    membership_reconcile_interval_seconds: float = 60.0
+    #: Bounds on reconciliation performed inline on an admission path, so it
+    #: cannot stretch ``join``/``follow`` latency without limit.
+    membership_reconcile_max_concurrency: int = 4
+    membership_reconcile_attempt_timeout_seconds: float = 3.0
+
+    #: ``follow_my_meeting`` open_id allowlist. ``None`` accepts any open_id.
+    #: The SDK cannot verify that the supplied open_id belongs to whoever
+    #: triggered the call, so passing user-controlled input straight through
+    #: means listening in on somebody else's meeting with their ticket.
+    follow_allowlist: Optional[List[str]] = None
+
+    #: Inviter open_id allowlist for ``meeting_invited_v1``. ``None`` accepts
+    #: invitations from anybody — the default, because a closed default would
+    #: make the feature unusable out of the box. This path does **not** pass
+    #: through ``PolicyConfig``.
+    invite_allowlist: Optional[List[str]] = None
+
+
+@dataclass
 class ChannelConfig:
     """Top-level configuration for :class:`FeishuChannel`.
 
@@ -538,3 +628,7 @@ class ChannelConfig:
     # match the requested ``id_type``. Results flow through the internal roster
     # cache. (Typed ``Any`` to avoid an import cycle with ``types``.)
     resolve_chat_members: Optional[Callable[..., Any]] = None
+
+    # Meeting channel. Appended last so the existing positional field
+    # order (locked by test_security_config) stays stable.
+    meeting: MeetingChannelConfig = field(default_factory=MeetingChannelConfig)

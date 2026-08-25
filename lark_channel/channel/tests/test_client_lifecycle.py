@@ -6,7 +6,9 @@ pipeline construction, dispatcher building — are all testable in isolation.
 """
 
 import asyncio
+import gc
 import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -492,3 +494,203 @@ def test_emit_reject_dispatches_to_registered_handler():
     ))
     assert len(got) == 1
     assert got[0].reason == "policy_dm_disabled"
+
+
+def _spin_up_loop():
+    """A real loop on its own thread, the way `FeishuChannel` runs one."""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    return loop, thread
+
+
+def _tear_down_loop(loop, thread):
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(timeout=5)
+    loop.close()
+
+
+def _pending_sweep_tasks(loop):
+    """Snapshot the sweep tasks still alive on `loop`, and whether each is spent.
+
+    "Spent" means the coroutine has no frame left — it ran to completion or was
+    closed. A task that is still pending behind a spent coroutine is the state
+    asyncio can never produce on its own, and the one that later surfaces as
+    "Task was destroyed but it is pending".
+    """
+
+    async def _snapshot():
+        return [
+            getattr(task.get_coro(), "cr_frame", None) is None
+            for task in asyncio.all_tasks()
+            if getattr(task.get_coro(), "__name__", "") == "_sweep"
+        ]
+
+    return asyncio.run_coroutine_threadsafe(_snapshot(), loop).result(timeout=5)
+
+
+def test_sweep_finishes_even_when_a_task_refuses_its_cancellation():
+    """A task that will not die must not strand the sweep on the loop.
+
+    The bg loop carries tasks that swallow `CancelledError` (a WS receive loop
+    mid-reconnect, say). If the sweep waits for all of them to converge, it
+    hangs until the loop is stopped underneath it and then *it* becomes the
+    task destroyed while pending — the residue it exists to prevent. An
+    implementation that gathers instead of bounding the wait leaves its own
+    task on the loop here and must fail this test.
+    """
+    loop, thread = _spin_up_loop()
+    started = threading.Event()
+    release = threading.Event()
+    cancellations = []
+
+    async def _stubborn():
+        started.set()
+        while True:
+            try:
+                await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                cancellations.append(1)
+                if release.is_set():
+                    raise
+
+    stubborn = asyncio.run_coroutine_threadsafe(_stubborn(), loop)
+    assert started.wait(timeout=5)
+
+    try:
+        _ChannelClient._sweep_bg_loop_tasks(loop, timeout=0.3)
+
+        assert cancellations, "the sweep never cancelled what was on the loop"
+        leftover = _pending_sweep_tasks(loop)
+        assert not leftover, (
+            "the sweep's own task is still pending on the loop; it waited for a "
+            "task that refuses to converge instead of bounding the wait"
+        )
+    finally:
+        release.set()
+        stubborn.cancel()
+        _tear_down_loop(loop, thread)
+
+
+def test_sweep_leaves_nothing_behind_when_the_loop_refuses_the_task():
+    """A loop that is already closing refuses `create_task`, mid-callback.
+
+    That happens on the loop's own thread, after the coroutine exists, so it is
+    the one place the sweep really does have to clean up after itself. Dropping
+    the coroutine there surfaces later as a never-awaited warning blamed on
+    unrelated code; `pytest.ini` turns that into an error, so a leak fails this
+    test. The sweep must also stop rather than try to cancel a task that was
+    never created.
+    """
+
+    class _LoopRefusingTasks:
+        def __init__(self):
+            self.calls = 0
+
+        def is_running(self):
+            return True
+
+        def create_task(self, coro):
+            raise RuntimeError("Event loop is closed")
+
+        def call_soon_threadsafe(self, callback, *args):
+            self.calls += 1
+            callback(*args)
+
+    loop = _LoopRefusingTasks()
+    _ChannelClient._sweep_bg_loop_tasks(loop, timeout=0.05)
+    assert loop.calls == 1, "nothing should have been cancelled"
+    gc.collect()
+
+
+def test_sweep_creates_no_coroutine_when_the_loop_will_not_take_it():
+    """If the loop closes before scheduling, there must be nothing left behind.
+
+    The coroutine is built on the loop's own thread, so a loop that refuses the
+    callback never causes one to exist. Were it built up front instead, dropping
+    it here would surface as a never-awaited warning attributed to unrelated
+    code — an error under `pytest.ini`, so a leak fails this test.
+    """
+
+    class _LoopThatClosesMidCall:
+        def is_running(self):
+            return True
+
+        def call_soon_threadsafe(self, *args, **kwargs):
+            raise RuntimeError("Event loop is closed")
+
+    _ChannelClient._sweep_bg_loop_tasks(_LoopThatClosesMidCall(), timeout=0.1)
+    gc.collect()
+
+
+def test_sweep_stays_quiet_when_the_loop_closes_before_the_cancel_lands(caplog):
+    """A loop that dies mid-sweep must not turn shutdown into a stack trace.
+
+    The window is: the sweep was scheduled, the loop then stopped servicing
+    callbacks, and by the time we go to cancel it the loop is gone — the normal
+    shape when something else (a failed WS start, say) tore it down. That has to
+    end quietly. Cancelling through a `concurrent.futures` future cannot satisfy
+    this: its cancel callback re-enters the closed loop and that module logs the
+    failure itself, out of reach of any `try` here.
+    """
+    import logging
+
+    class _Task:
+        def __init__(self):
+            self.cancelled = False
+
+        def add_done_callback(self, _callback):
+            pass  # never fires: this task does not finish
+
+        def cancel(self):
+            self.cancelled = True
+
+    class _LoopClosingAfterSchedule:
+        def __init__(self):
+            self.task = _Task()
+            self.calls = 0
+
+        def is_running(self):
+            return True
+
+        def create_task(self, coro):
+            coro.close()  # stands in for the loop running it
+            return self.task
+
+        def call_soon_threadsafe(self, callback, *args):
+            self.calls += 1
+            if self.calls == 1:
+                callback(*args)
+                return
+            raise RuntimeError("Event loop is closed")
+
+    loop = _LoopClosingAfterSchedule()
+    with caplog.at_level(logging.DEBUG, logger="lark_channel"):
+        _ChannelClient._sweep_bg_loop_tasks(loop, timeout=0.05)
+
+    assert loop.calls == 2, "the cancel was never attempted"
+    assert not loop.task.cancelled, "the fake loop was supposed to refuse it"
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    gc.collect()
+
+
+def test_an_identity_retry_is_not_scheduled_onto_a_stopped_loop():
+    """Scheduling onto a stopped-but-open loop silently goes nowhere.
+
+    `run_coroutine_threadsafe` only refuses a *closed* loop; for one that has
+    merely stopped it queues a callback that never runs. The coroutine handed to
+    it is then never awaited — surfacing at GC time as an unraisable warning
+    blamed on whatever test happens to be running — and the future stored here
+    never completes, so a later retry sees "one is already in flight" and never
+    starts one. An implementation that schedules anyway must fail this test.
+    """
+    c = _client()
+    loop = asyncio.new_event_loop()
+    try:
+        c._bg_loop = loop  # stopped, not closed: the window that leaked
+        c._start_bot_identity_retry_loop()
+        assert c._bot_identity_retry_future is None, (
+            "a retry was scheduled onto a loop that will never run it"
+        )
+    finally:
+        loop.close()

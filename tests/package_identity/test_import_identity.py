@@ -29,7 +29,7 @@ def test_transport_keepalive_config_imports_from_package_root():
     assert KeepaliveConfig is ChannelKeepaliveConfig
 
 
-def test_release_version_is_1_2_0():
+def test_release_version_is_1_3_0():
     from lark_channel.core.const import VERSION
 
-    assert VERSION == "1.2.0"
+    assert VERSION == "1.3.0"
