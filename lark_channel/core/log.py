@@ -28,6 +28,11 @@ _SENSITIVE_KEY_PARTS = (
     "set_cookie",
     "secret",
     "password",
+    # A one-click authorization link is a signed capability — a credential in
+    # link form. `authorization_url` needs no entry: the `authorization`
+    # substring above already covers it. `_normalize_key` folds camelCase, so
+    # this one key covers `consoleUrl` too.
+    "console_url",
 )
 _SENSITIVE_EXACT_KEYS = {
     "token",

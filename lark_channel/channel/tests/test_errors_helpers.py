@@ -12,11 +12,14 @@ from lark_channel.channel.errors import (
 )
 
 
-def test_feishu_channel_error_code_has_10_canonical_values():
+def test_feishu_channel_error_code_has_13_canonical_values():
     canonical = {
         "format_error", "target_revoked", "rate_limited", "permission_denied",
         "upload_failed", "download_failed", "ssrf_blocked", "send_timeout",
         "not_connected", "unknown",
+        # Appended for the meeting channel; the ten above keep their values, so
+        # `except`/comparison on any of them is unaffected.
+        "not_supported", "meeting_not_found", "too_many_sessions",
     }
     assert {m.value for m in FeishuChannelErrorCode} == canonical
 

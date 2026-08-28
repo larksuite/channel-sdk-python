@@ -38,6 +38,7 @@ ChannelEventName = Literal[
     "reject",
     "comment",
     "raw",
+    "meetingInvited",
     "reconnecting",
     "reconnected",
     "error",
@@ -63,6 +64,7 @@ class Events:
     REJECT = "reject"
     COMMENT = "comment"
     RAW = "raw"
+    MEETING_INVITED = "meetingInvited"
     RECONNECTING = "reconnecting"
     RECONNECTED = "reconnected"
     ERROR = "error"

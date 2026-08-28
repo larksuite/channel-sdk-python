@@ -44,6 +44,7 @@ from .config import (
     MarkdownConverter,
     MediaCacheConfig,
     MediaCapabilities,
+    MeetingChannelConfig,
     NameCacheConfig,
     OutboundConfig,
     OversizeContext,
@@ -176,6 +177,25 @@ from .types import (
     VoteContent,
 )
 
+from .meeting import (
+    ActivityTypeStats,
+    DocumentContextEvent,
+    LivenessHealth,
+    MeetingActor,
+    MeetingChatEvent,
+    MeetingEndEvent,
+    MeetingEventHealth,
+    MeetingEvents,
+    MeetingInvitedEvent,
+    MeetingOptions,
+    MeetingSession,
+    MembershipHealth,
+    ParticipantEvent,
+    ShareDocInfo,
+    ShareEvent,
+    TranscriptEvent,
+)
+
 __all__ = [
     # Entry points
     "FeishuChannel",
@@ -210,6 +230,24 @@ __all__ = [
     "TextBatchConfig",
     "TransportConfig",
     "UATConfig",
+    # Meeting channel
+    "ActivityTypeStats",
+    "DocumentContextEvent",
+    "LivenessHealth",
+    "MeetingActor",
+    "MeetingChatEvent",
+    "MeetingEndEvent",
+    "MeetingEventHealth",
+    "MeetingEvents",
+    "MeetingInvitedEvent",
+    "MeetingOptions",
+    "MeetingSession",
+    "MembershipHealth",
+    "ParticipantEvent",
+    "ShareDocInfo",
+    "ShareEvent",
+    "TranscriptEvent",
+    "MeetingChannelConfig",
     # Events
     "ChannelEventName",
     "Events",

@@ -1,6 +1,6 @@
 """Channel error types and classification.
 
-Single canonical enum: `FeishuChannelErrorCode` — 10 values covering the
+Single canonical enum: `FeishuChannelErrorCode` — 13 values covering the
 taxonomy of failures surfaced by the outbound / inbound pipelines.
 """
 
@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 
 
 class FeishuChannelErrorCode(str, Enum):
-    """Channel-layer error taxonomy (10 canonical values)."""
+    """Channel-layer error taxonomy (13 canonical values)."""
 
     FORMAT_ERROR = "format_error"
     TARGET_REVOKED = "target_revoked"
@@ -22,6 +22,16 @@ class FeishuChannelErrorCode(str, Enum):
     SEND_TIMEOUT = "send_timeout"
     NOT_CONNECTED = "not_connected"
     UNKNOWN = "unknown"
+    # Appended for the meeting channel. Existing values are unchanged, and
+    # `classify_error` keeps its current mapping: none of these three come
+    # from a Feishu error code, they are all local decisions.
+    #: The operation does not exist in this session's mode — `send_message`
+    #: on a `uat` session, where the bot is not a participant.
+    NOT_SUPPORTED = "not_supported"
+    #: No active meeting to follow, or the target meeting is gone.
+    MEETING_NOT_FOUND = "meeting_not_found"
+    #: The concurrent-session ceiling is reached.
+    TOO_MANY_SESSIONS = "too_many_sessions"
 
 
 @dataclass

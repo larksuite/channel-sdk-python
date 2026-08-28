@@ -65,6 +65,12 @@ from lark_channel.core.cache import ICache
 
 from .auth.token_store import InMemoryTokenStore, TokenStore
 from .auth.uat_runner import require_user_auth
+from .auth.uat_runner import resolve_user_auth_non_interactive
+from .meeting import dedup as _meeting_dedup
+from .meeting.loop_affinity import await_on as _await_on_loop
+from .meeting import registry as _meeting_registry
+from .meeting.types import MeetingEventHealth, MeetingOptions
+from .raw_events import RawEventRegistry
 from .bot_identity import BotIdentity, fetch_bot_identity
 from .chat_member_cache import ChatMemberCache
 from .chat_mode import ChatModeCache
@@ -104,6 +110,7 @@ from .outbound.streaming.card_stream import CardStreamController
 from .outbound.streaming.markdown_stream import MarkdownStreamController
 from .quote import QuoteResolver
 from .safety import RejectEvent, SafetyPipeline
+from .safety.dedup_cache import SeenCache
 from .types import (
     UAT,
     BotAddedEvent,
@@ -286,6 +293,21 @@ def _extract_fetched_sender(item: Dict[str, Any]) -> Any:
 # ---------------------------------------------------------------------------
 
 
+#: The only scope the follow path asks for. What the platform actually grants
+#: is whatever the app has applied for, which is usually much broader — see
+#: `follow_my_meeting` and docs/security.md.
+_MEETING_EVENT_SCOPE = "vc:meeting.meetingevent:read"
+
+
+def _meeting_payload(handler):
+    """Adapt a dispatcher callback to the meeting channel's dict-in signature."""
+
+    def _dispatch(data):
+        handler(_coerce.obj_to_dict(data) or {})
+
+    return _dispatch
+
+
 class FeishuChannel:
     """Single public entry point for the Feishu Channel capability layer.
 
@@ -395,6 +417,13 @@ class FeishuChannel:
             .app_secret(cfg.app_secret)
             .domain(cfg.domain)
             .log_level(cfg.log_level)
+            # Required for `RequestOption.user_access_token` to have any effect
+            # at all: with it off, `core.token.auth.verify` skips manual tokens
+            # entirely, so a request declaring the user identity gets a freshly
+            # minted tenant token instead and the user's authorization becomes
+            # decoration. Additive — a request that carries no manual token
+            # still mints from app credentials exactly as before.
+            .enable_set_token(True)
             .timeout(cfg.transport.http_timeout_seconds)
             .proxy_url(cfg.transport.proxy_url)
             .trust_env_proxy(cfg.transport.trust_env_proxy)
@@ -495,6 +524,26 @@ class FeishuChannel:
         self._bg_tasks_lock = threading.Lock()
 
         self._shutdown = threading.Event()
+        self._raw_events = RawEventRegistry(
+            schedule=self.schedule, report=self._report_raw_error
+        )
+        self._meeting = _meeting_registry.MeetingChannel(
+            client=self._client,
+            config=self._config,
+            # A dedicated cache: platform event ids are global, so sharing the
+            # message layer's key space would let one layer's mark swallow the
+            # other layer's event.
+            seen=SeenCache(
+                cache=safety_cache,
+                namespace=_meeting_dedup.NAMESPACE,
+            ),
+            bot_open_id_getter=self._meeting_bot_open_id,
+            schedule=self.schedule,
+            resolve_ticket_interactive=self._meeting_ticket_interactive,
+            resolve_ticket_quiet=self._meeting_ticket_quiet,
+            emit_invited=self._emit_meeting_invited,
+            timeout_seconds=self._config.transport.http_timeout_seconds or 30.0,
+        )
         self._stop_requested = False
         self._started = False
         self._lifecycle_lock = threading.Lock()
@@ -758,6 +807,13 @@ class FeishuChannel:
                 ev.set()
             except Exception:  # pragma: no cover
                 pass
+        # One of the three reconciliation points: a seat stranded by an
+        # inconclusive departure before the connection dropped is exactly what a
+        # fresh connection wants back.
+        try:
+            self._meeting.on_connected()
+        except Exception as e:  # pragma: no cover - never block readiness
+            logger.debug("channel: meeting reconcile on connect skipped: %s", e)
 
     def _ensure_ready_event(self) -> "asyncio.Event":
         """Lazily create the asyncio.Event so we don't need a running loop in __init__."""
@@ -861,7 +917,14 @@ class FeishuChannel:
             await asyncio.sleep(0.05)
 
     async def disconnect(self) -> None:
-        """Gracefully drain safety pipeline batches + stop the WS loop."""
+        """Gracefully drain safety pipeline batches + stop the WS loop.
+
+        Meeting sessions are **disposed, not left**: a reconnect must not make
+        the bot walk out of every meeting it is in. The bot therefore stays a
+        participant, which is why those seats stay counted and why a process
+        that is really exiting should ``leave()`` first.
+        """
+        await self._dispose_meeting_sessions()
         if self._safety is not None:
             try:
                 await self._safety.dispose()
@@ -995,13 +1058,20 @@ class FeishuChannel:
 
         1. Signal shutdown (sets ``self._shutdown``).
         2. Stop the WS client if one was created.
-        3. Cancel in-flight futures returned from :meth:`schedule`.
-        4. Run ``DeviceFlowClient.close()`` on the bg loop to release httpx.
-        5. Stop the bg loop and join its thread.
+        3. Dispose meeting sessions so their tasks stop before the loop does.
+        4. Cancel in-flight futures returned from :meth:`schedule`.
+        5. Run ``DeviceFlowClient.close()`` on the bg loop to release httpx.
+        6. Stop the bg loop and join its thread.
         """
         if self._shutdown.is_set():
             return
         self._shutdown.set()
+        # Before the loop goes away: a session owns tasks and timers created
+        # directly on it, which `_cancel_bg_tasks` does not know about. Left
+        # running they are destroyed mid-flight when the loop closes, and the
+        # resulting "Task was destroyed but it is pending" lands wherever the
+        # process happens to be logging at the time.
+        self._dispose_meeting_sessions_blocking()
         if self._start_future is not None:
             try:
                 self._start_future.cancel()
@@ -1264,7 +1334,12 @@ class FeishuChannel:
         future = self._bot_identity_retry_future
         if future is not None and not future.done():
             return
-        if self._bg_loop is None:
+        # `run_coroutine_threadsafe` accepts a callback for a loop that has
+        # stopped but is not yet closed, and that callback never runs — leaving
+        # the coroutine built below unawaited, and a future here that never
+        # completes. Retrying on a loop that is not running has nothing to do
+        # anyway, so check before building anything.
+        if self._bg_loop is None or not self._bg_loop.is_running():
             return
         coro = self._bot_identity_retry_loop()
         try:
@@ -1286,9 +1361,101 @@ class FeishuChannel:
                 pass
         self._drain_cancelled_bg_tasks()
 
+    @staticmethod
+    def _sweep_bg_loop_tasks(loop: Any, *, timeout: float = 5.0) -> None:
+        """Cancel every task left on ``loop`` and let the cancellations land.
+
+        `timeout` bounds how long cancellations are given to converge. It is
+        generous because overshooting only costs a slow shutdown, while
+        undershooting downgrades "every task converged" to "some tasks were
+        abandoned" on a loaded machine — which surfaces later as "Task was
+        destroyed but it is pending" from whatever happens to be running then,
+        the least useful place to see it.
+
+        The bound is enforced *inside* the loop rather than by waiting across
+        threads, because a task that never accepts its cancellation must not be
+        able to strand this sweep. Enforcing it from here instead would leave
+        the sweep's own task pending on a loop about to be stopped — the exact
+        residue this function exists to prevent.
+        """
+
+        async def _sweep() -> None:
+            current = asyncio.current_task()
+            pending = [
+                task
+                for task in asyncio.all_tasks()
+                if task is not current and not task.done()
+            ]
+            for task in pending:
+                task.cancel()
+            if pending:
+                # `wait`, not `gather`: it returns when the budget runs out
+                # instead of hanging on whatever refuses to converge, so this
+                # coroutine always finishes and can never become the orphan.
+                await asyncio.wait(pending, timeout=timeout)
+
+        if not loop.is_running():
+            return
+
+        # Deliberately not `run_coroutine_threadsafe`: it ties the task to a
+        # `concurrent.futures.Future` through `_chain_future`, whose cancel
+        # callback re-enters `loop.call_soon_threadsafe`. During shutdown the
+        # loop is usually closed by then, and that raises *inside* a
+        # `concurrent.futures` callback — which that module logs itself, out of
+        # reach of any `try` here. Scheduling by hand keeps both ownership of
+        # the coroutine and delivery of the cancellation in code we control.
+        state = {}
+        finished = threading.Event()
+
+        def _schedule() -> None:
+            # Built here, on the loop's own thread, so a callback the loop
+            # never gets around to running leaves no coroutine behind.
+            coro = _sweep()
+            try:
+                task = loop.create_task(coro)
+            except RuntimeError:
+                # A loop that is already closing refuses new tasks, and the
+                # coroutine is still ours at that point.
+                coro.close()
+                finished.set()
+                return
+            state["task"] = task
+            task.add_done_callback(lambda _task: finished.set())
+
+        try:
+            loop.call_soon_threadsafe(_schedule)
+        except RuntimeError:
+            return  # the loop closed; nothing was scheduled and nothing leaked
+
+        # The sweep bounds itself by `timeout`, so this only expires when the
+        # loop stops servicing callbacks at all. One extra second covers the
+        # scheduling hop rather than racing it.
+        if finished.wait(timeout + 1.0):
+            return
+
+        task = state.get("task")
+        if task is None:
+            return  # the loop never ran `_schedule`, so there is no task
+        logger.debug(
+            "FeishuChannel.stop: bg loop stopped servicing callbacks within "
+            "%.1fs; cancelling the sweep",
+            timeout + 1.0,
+        )
+        try:
+            loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            pass  # the loop closed, taking the task with it
+
     def _stop_bg_loop(self, *, join_timeout: float) -> None:
         loop = self._bg_loop
         thread = self._bg_thread
+        if loop is not None:
+            # Anything still pending on this loop is about to be destroyed
+            # mid-flight, which asyncio reports as "Task was destroyed but it is
+            # pending". Collaborators create tasks directly on the loop
+            # (delivery queues, polling loops), so `_cancel_bg_tasks` does not
+            # see them. Cancel whatever is left and give it one turn.
+            self._sweep_bg_loop_tasks(loop)
         if loop is not None:
             try:
                 loop.call_soon_threadsafe(loop.stop)
@@ -1438,14 +1605,47 @@ class FeishuChannel:
         # the legacy callback channel uses p1 (event has ``uuid``), but
         # the modern WS frontier wraps the same event in a p2 envelope
         # (``schema=2.0``). Register the customized-event handler under
-        # both so neither path logs "processor not found".
+        # both so neither entry point logs "processor not found".
         b = b.register_p1_customized_event(
             "drive.notice.comment_add_v1", self._on_p1_comment_add
         )
         b = b.register_p2_customized_event(
             "drive.notice.comment_add_v1", self._on_p1_comment_add
         )
+        problems = self._register_meeting_events(b)
+        # Raw subscriptions go on last, so they can compose with whatever the
+        # built-ins above installed. The whole table is rebuilt on every
+        # start(), so this replay is what keeps them alive across a restart.
+        replay_problem = self._raw_events.apply(b)
+        problem = problems or replay_problem
+        self._meeting.mark_registration(ok=not problems, reason=problem)
         return b.build()
+
+    def _register_meeting_events(self, builder) -> Optional[str]:
+        """Install the three ``vc.bot.*`` processors. Returns a failure note.
+
+        Not fatal: an application that has not declared these subscriptions in
+        the developer console still wants its message path to start. The health
+        readout is where the failure becomes visible.
+        """
+        wiring = (
+            (_meeting_registry.ACTIVITY_EVENT, self._meeting.on_activity),
+            (_meeting_registry.INVITED_EVENT, self._meeting.on_invited),
+            (_meeting_registry.ENDED_EVENT, self._meeting.on_ended),
+        )
+        for event_type, handler in wiring:
+            try:
+                builder.register_p2_customized_event(
+                    event_type, _meeting_payload(handler)
+                )
+            except Exception as e:
+                logger.warning(
+                    "channel: could not subscribe to %s (%s)",
+                    event_type,
+                    type(e).__name__,
+                )
+                return "%s: %s" % (event_type, type(e).__name__)
+        return None
 
     # ------------------------------------------------------------------
     # Raw sync entry points — schedule async work on the bg loop
@@ -2983,6 +3183,214 @@ class FeishuChannel:
     # ------------------------------------------------------------------
     # UAT (user access token) — exposed for callers that need it explicitly
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Meeting channel
+    # ------------------------------------------------------------------
+    async def follow_my_meeting(
+        self,
+        *,
+        user_open_id: str,
+        prompt_context: Any = None,
+        meeting_no: Optional[str] = None,
+        options: Optional[MeetingOptions] = None,
+    ) -> Any:
+        """Follow the meeting ``user_open_id`` is currently in, without joining —
+        and read the trust boundary on ``user_open_id`` and ``prompt_context``
+        before the parameters, because this SDK cannot enforce either of them.
+
+        ``user_open_id`` **must** be somebody the caller has already
+        established is the requester, and ``prompt_context`` must belong to that
+        same person. This SDK cannot check either: it receives a string, the
+        ticket store is shared per process, and a cached ticket resolves without
+        notifying its owner — so passing user-controlled input here listens in
+        on somebody else's meeting with their authorization, invisibly. Pairing
+        one person's ``user_open_id`` with another's ``prompt_context`` sends the
+        authorization card to the wrong person and files the resulting ticket
+        under the first. ``meeting.follow_allowlist`` is the available gate.
+
+        The bot is not a participant and is not visible in the meeting, so there
+        is no way to speak into it — respond over IM instead. Telling
+        participants and obtaining consent is the integrating application's
+        responsibility.
+
+        Unlike :meth:`join_meeting` this does not need ``connect()``: the path
+        is REST plus a user ticket, and opening a socket for it is pure
+        overhead.
+        """
+        return await self._on_bg_loop(
+            self._meeting.follow_my_meeting(
+                user_open_id=user_open_id,
+                prompt_context=prompt_context,
+                meeting_no=meeting_no,
+                options=options,
+            )
+        )
+
+    async def join_meeting(
+        self,
+        meeting_no: str,
+        *,
+        password: Optional[str] = None,
+        call_id: Optional[str] = None,
+        options: Optional[MeetingOptions] = None,
+    ) -> Any:
+        """Put the bot in a meeting as a participant. Needs ``connect()``.
+
+        ``password`` is a credential and is passed to the platform and nowhere
+        else — it does not reach logs, ``raw`` payloads or error objects.
+
+        Remember that ``dispose()`` does **not** leave the meeting, so a
+        reconnect leaves the bot where it is; only an explicit ``leave()``
+        removes it.
+        """
+        try:
+            return await self._on_bg_loop(
+                self._meeting.join_meeting(
+                    meeting_no,
+                    connected=bool(self.is_ready or self._started),
+                    password=password,
+                    call_id=call_id,
+                    options=options,
+                )
+            )
+        finally:
+            # Dropped from this frame's locals. A wrong password is the ordinary
+            # way this call fails, and on the failing path this frame is part of
+            # the raised error's `__traceback__` — where a crash reporter that
+            # reads frame locals would find it.
+            password = None
+
+    def get_meeting_event_health(self) -> MeetingEventHealth:
+        """Diagnostics for the in-meeting event path.
+
+        Failures here are silent by nature — an undeclared subscription, a
+        missing permission and a renamed field all look like "nothing
+        happened". ``received`` versus ``stats[type].empty`` separates "the
+        platform never sent it" from "it sent it and we could not read it".
+        """
+        return self._meeting.health()
+
+    def on_raw_event(self, event_type: str, handler: Callable) -> Unsubscribe:
+        """Subscribe to a Feishu event type the channel has not wrapped.
+
+        Multicast; returns an unsubscribe. Pass the event type **without** a
+        schema prefix, e.g. ``"vc.bot.meeting_started_v1"``.
+
+        Distinct from the ``"raw"`` event: that one mirrors already-wrapped
+        events and is controlled by ``inbound.emit_raw_events``. This one
+        subscribes to types the channel does not wrap and ignores that switch.
+
+        The payload is authentic — this runs after signature verification and
+        decryption — but **unredacted**, and this path sits **outside** the
+        safety pipeline: no policy gate, no dedup, no processing lock, no loop
+        guard. Subscribing to a type the channel already handles therefore opens
+        an unpoliced path into that type: with ``dm_policy="allowlist"`` set,
+        a raw subscription to ``im.message.receive_v1`` still receives direct
+        messages from everybody, and redelivered events run the handler again.
+        """
+        subscription = self._raw_events.subscribe(event_type, handler)
+        dispatcher = self._dispatcher
+        if dispatcher is not None:
+            # Installed onto the dispatcher **in place**. Replacing
+            # `self._dispatcher` with a freshly built one would only work for
+            # consumers that re-read the attribute on every event; anything
+            # holding the instance it was given — which is what a transport
+            # does — would not see this subscription until the next `start()`.
+            self._raw_events.install(dispatcher)
+        return subscription
+
+    def _dispose_meeting_sessions_blocking(self, *, timeout: float = 10.0) -> None:
+        """Dispose meeting sessions from a synchronous teardown path.
+
+        Bounded by the sessions' own drain deadlines rather than by this
+        number, which only has to be larger than theirs. Sessions drain
+        concurrently, so the floor is one session — but that one is
+        ``dispose_drain_timeout_seconds`` **twice**: once waiting for its
+        loops to unwind and once for the delivery queue. With the 5s default
+        that is 10s — exactly this budget, with nothing to spare. So raising
+        that configuration, or lowering this number, times out here; lowering
+        the configuration is safe. Timing out abandons the remaining sessions'
+        tasks to the loop shutdown below.
+        """
+        loop = self._bg_loop
+        if loop is None or not loop.is_running():
+            self._meeting.dispose_all()
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._dispose_meeting_sessions_inner(), loop
+            )
+            future.result(timeout=timeout)
+        except Exception as e:  # pragma: no cover - teardown must not raise
+            logger.warning(
+                "FeishuChannel.stop: disposing meeting sessions failed: %s",
+                type(e).__name__,
+            )
+
+    async def _dispose_meeting_sessions(self) -> None:
+        """Stop local meeting work on the loop that owns it."""
+        if self._bg_loop is None:
+            self._meeting.dispose_all()
+            return
+        try:
+            await self._on_bg_loop(self._dispose_meeting_sessions_inner())
+        except Exception as e:  # pragma: no cover - teardown must not raise
+            logger.warning("channel: disposing meeting sessions failed: %s", e)
+
+    async def _dispose_meeting_sessions_inner(self) -> None:
+        sessions = self._meeting.dispose_all()
+        await self._meeting.drain_sessions(sessions)
+
+    async def _on_bg_loop(self, coro):
+        """Run ``coro`` on the channel's background loop and await its result.
+
+        Everything a session owns — the delivery queue, the polling tasks, the
+        debounce timers — has to live on **one** loop, and it has to be the loop
+        the dispatcher schedules onto. Building them on whatever loop happened
+        to call ``join_meeting()`` puts an ``asyncio.Queue``'s consumer on one
+        loop and its producer on another, and a put there simply never wakes the
+        getter: events are accepted and silently never delivered.
+        """
+        self._ensure_bg_loop()
+        # Deliberately not `schedule()`: that one logs anything the coroutine
+        # raises, and the caller of this method already receives the exception.
+        # A wrong meeting password would otherwise be reported twice, once as an
+        # unhandled background failure.
+        return await _await_on_loop(self._bg_loop, lambda: coro)
+
+    def _meeting_bot_open_id(self) -> Optional[str]:
+        identity = self._bot_identity
+        return getattr(identity, "open_id", None) if identity is not None else None
+
+    async def _meeting_ticket_interactive(
+        self, *, user_open_id: str, prompt_context: Any
+    ) -> str:
+        uat = await require_user_auth(
+            device_flow=self._device_flow,
+            token_store=self._token_store,
+            uat_config=self._config.uat,
+            user_open_id=user_open_id,
+            scopes=[_MEETING_EVENT_SCOPE],
+            context=prompt_context,
+        )
+        return uat.access_token
+
+    async def _meeting_ticket_quiet(self, user_open_id: str) -> str:
+        """Per-round ticket lookup: cache and refresh only, never a prompt."""
+        uat = await resolve_user_auth_non_interactive(
+            device_flow=self._device_flow,
+            token_store=self._token_store,
+            uat_config=self._config.uat,
+            user_open_id=user_open_id,
+        )
+        return uat.access_token
+
+    async def _emit_meeting_invited(self, event: Any) -> None:
+        await self._invoke("meetingInvited", event)
+
+    def _report_raw_error(self, exc: BaseException) -> Any:
+        return self._invoke("error", exc)
+
     async def require_user_auth(
         self,
         user_open_id: str,
@@ -2993,14 +3401,36 @@ class FeishuChannel:
         """Resolve a user access token for ``user_open_id``, running the
         device flow if needed. ``prompt_context`` must expose
         ``respond(card)`` if the user needs a prompt card (usually the
-        original interaction carrier)."""
-        return await require_user_auth(
-            device_flow=self._device_flow,
-            token_store=self._token_store,
-            uat_config=self._config.uat,
-            user_open_id=user_open_id,
-            scopes=scopes,
-            context=prompt_context,
+        original interaction carrier).
+
+        Runs on the channel's background loop, so every ticket resolution in the
+        process contends on one per-user lock — including the meeting channel's
+        per-round lookups. Those locks are ``asyncio.Lock``s bound to the loop
+        that created them, so callers spread across loops would get no mutual
+        exclusion at all, and the loser of a concurrent refresh has its still
+        valid ticket deleted.
+
+        Two consequences worth knowing: ``prompt_context.respond`` is invoked
+        from that loop's thread, so an object bound to a different loop will not
+        work; and a process that only ever calls this method still gets the
+        channel's background thread.
+        """
+        # Routed onto the background loop so every ticket resolution in this
+        # process — this one, and the meeting channel's per-round lookups —
+        # contends on the same per-user lock. Those locks are `asyncio.Lock`s
+        # bound to the loop that created them, so callers spread across loops
+        # get no mutual exclusion at all; funnelling through one loop restores
+        # it, which matters because the loser of a concurrent refresh has its
+        # (still valid) ticket deleted.
+        return await self._on_bg_loop(
+            require_user_auth(
+                device_flow=self._device_flow,
+                token_store=self._token_store,
+                uat_config=self._config.uat,
+                user_open_id=user_open_id,
+                scopes=scopes,
+                context=prompt_context,
+            )
         )
 
     def _track_sent_message(self, message_id: str) -> None:

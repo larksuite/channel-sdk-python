@@ -206,6 +206,14 @@ class Client(object):
         self._reconnect_interval: int = 120
         self._ping_interval: int = 120
         self._cache: ExpiringCache = ExpiringCache(clear_interval=30)
+        # On 3.8/3.9 `asyncio.Lock()` and `asyncio.Semaphore()` bind to a loop
+        # at construction, so building a client from a thread that has none
+        # raises. This used to be papered over from an unlikely place: the
+        # cache's constructor installed a loop as a side effect of looking one
+        # up for its own background task. Removing that task removed the prop,
+        # so the requirement is stated here, where the primitives that need it
+        # actually live. On 3.10+ they bind on first use and this is a no-op.
+        self._ensure_thread_event_loop()
         self._lock = asyncio.Lock()
         self._reconnect_lock = asyncio.Lock()
         self._handler_semaphore = (
@@ -221,6 +229,14 @@ class Client(object):
         self.on_reconnecting: Callable[[], None] = lambda: None
         self.on_reconnected: Callable[[], None] = lambda: None
         logger.setLevel(log_level.value)
+
+    @staticmethod
+    def _ensure_thread_event_loop() -> None:
+        """Make sure the calling thread has an event loop to bind to."""
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
 
     def start(self) -> None:
         try:
