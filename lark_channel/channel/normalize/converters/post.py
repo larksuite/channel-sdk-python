@@ -1,7 +1,7 @@
 """Converter: PostContent → Markdown (headings / bold / italic / code / links)."""
 
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, NamedTuple, Tuple
 
 from ...types import PostContent, ResourceDescriptor
 from ._utils import attr
@@ -10,23 +10,66 @@ _AT_MENTION_RE = re.compile(r'<at(\s+)user_id(\s*)=(\s*)"(.*?)">(.*?)</at>')
 _IMAGE_KEY_RE = re.compile(r"!\[(.*?)\]\(([^)]+)\)")
 
 
-def _attachment_files(post: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Top-level attachment zone (``files`` array) of a post message.
+class _Attachment(NamedTuple):
+    """A validated attachment-zone entry.
 
-    The rich-text attachment zone lives at the top level of the post JSON,
-    outside any locale document: ``files: [{file_key, file_name, is_folder}]``.
-    Rendered the same way as the standalone file/folder message converters
-    (``<file key="..." name="..."/>`` / ``<folder .../>``).
+    Every field is guaranteed by :func:`_attachment_files`: ``key`` is a
+    non-empty string, ``name`` is a string (empty when absent or non-string),
+    and ``is_folder`` is a real bool — so callers can interpolate without
+    re-checking types.
+    """
+
+    key: str
+    name: str
+    is_folder: bool
+
+
+def _attachment_files(post: Dict[str, Any]) -> List[_Attachment]:
+    """Return the usable entries of a post's top-level attachment zone.
+
+    The attachment zone is a *sibling* of the locale documents rather than part
+    of one: ``files: [{file_key, file_name, is_folder}]``.
+
+    Wire values are untrusted, so every field is narrowed here rather than at
+    the point of use: a non-string ``file_name`` reaching :func:`attr` would
+    raise ``AttributeError`` out of the whole normalize pipeline, and a
+    stringly ``is_folder`` (``"false"``) would hide a real, downloadable file
+    behind a ``<folder/>`` tag. Entries without a usable key are dropped —
+    unlike the standalone converters, there is no single attachment here for a
+    ``[file]`` / ``[folder]`` placeholder to stand in for.
+
+    Callers render each entry via :func:`_render_attachment`. The ``name``
+    attribute is omitted when empty, matching ``folder.convert`` and node's
+    ``post.ts`` (``file.convert`` differs: it always emits ``name=""``).
     """
     if not isinstance(post, dict):
         return []
     files = post.get("files")
     if not isinstance(files, list):
         return []
-    return [
-        f for f in files
-        if isinstance(f, dict) and isinstance(f.get("file_key"), str) and f["file_key"]
-    ]
+    attachments: List[_Attachment] = []
+    for f in files:
+        if not isinstance(f, dict):
+            continue
+        key = f.get("file_key")
+        if not isinstance(key, str) or not key:
+            continue
+        name = f.get("file_name")
+        attachments.append(
+            _Attachment(
+                key=key,
+                name=name if isinstance(name, str) else "",
+                is_folder=f.get("is_folder") is True,
+            )
+        )
+    return attachments
+
+
+def _render_attachment(att: _Attachment) -> str:
+    """Render one attachment-zone entry as a ``<file/>`` / ``<folder/>`` tag."""
+    tag = "folder" if att.is_folder else "file"
+    name_attr = f' name="{attr(att.name)}"' if att.name else ""
+    return f'<{tag} key="{attr(att.key)}"{name_attr}/>'
 
 
 def convert(content: PostContent) -> Tuple[str, List[ResourceDescriptor]]:
@@ -58,9 +101,14 @@ def _post_to_markdown(
     post: Dict[str, Any], drop_open_id: str = ""
 ) -> Tuple[str, List[ResourceDescriptor]]:
     docs = _iter_documents(post)
-    if not docs:
+    # The attachment zone is a sibling of the locale documents, not part of
+    # one, so it must be read before the guard below — otherwise a post with
+    # attachments but no usable locale document would silently drop them from
+    # the text while still surfacing them as resources.
+    attachments = _attachment_files(post)
+    if not docs and not attachments:
         return "", []
-    locale = docs[0]
+    locale = docs[0] if docs else {}
 
     # Choose source paragraphs: prefer content_v2, fallback to content.
     content_v2 = locale.get("content_v2")
@@ -119,28 +167,10 @@ def _post_to_markdown(
         line = "".join(chunks)
         if line:
             lines.append(line)
-    # Attachment zone: files render as <file .../> (same tag style as the
-    # standalone file converter) and are surfaced as downloadable resources;
-    # folders render as <folder .../> tags only (mirrors the standalone folder
-    # converter, resources=[]).
-    for f in _attachment_files(post):
-        key = f["file_key"]
-        name = f.get("file_name")
-        # Both key and name are escaped: downstream parses these tags as
-        # structured info, so a quote inside a key must not be able to forge
-        # an extra attribute. Non-string file_name degrades to no attribute.
-        if not isinstance(name, str):
-            name = ""
-        if f.get("is_folder"):
-            if name:
-                lines.append(f'<folder key="{attr(key)}" name="{attr(name)}"/>')
-            else:
-                lines.append(f'<folder key="{attr(key)}"/>')
-        else:
-            if name:
-                lines.append(f'<file key="{attr(key)}" name="{attr(name)}"/>')
-            else:
-                lines.append(f'<file key="{attr(key)}"/>')
+    # Attachment zone renders after the body; resource extraction for it lives
+    # in _post_resources (files only — folders are tag-only, mirroring
+    # folder.convert's resources=[]).
+    lines.extend(_render_attachment(att) for att in attachments)
     return "\n\n".join(lines).strip(), resources
 
 
@@ -179,10 +209,10 @@ def _post_resources(post: Dict[str, Any]) -> List[ResourceDescriptor]:
                     add("file", el.get("file_key"), file_name=el.get("file_name"))
     # Attachment zone: files are downloadable resources; folders are rendered
     # as tags only (mirrors the standalone folder converter, resources=[]).
-    for f in _attachment_files(post):
-        if f.get("is_folder"):
+    for att in _attachment_files(post):
+        if att.is_folder:
             continue
-        add("file", f.get("file_key"), file_name=f.get("file_name"))
+        add("file", att.key, file_name=att.name)
     return resources
 
 
