@@ -1,5 +1,6 @@
 """Tests for flat-string content + resources[] derivation (Node-aligned)."""
 
+from lark_channel.channel.normalize.converters.post import convert_body
 from lark_channel.channel.normalize.flatten import flatten
 from lark_channel.channel.types import (
     AudioContent,
@@ -369,6 +370,178 @@ def test_interactive_walk_handles_deep_card_without_recursion_error():
     t, _ = flatten(InteractiveContent(card={"body": {"elements": [node]}}, card_version="v2"))
 
     assert "deep leaf" in t
+
+
+def test_post_attachment_zone_renders_files_and_folders():
+    # Attachment zone lives at the top level of the post JSON, outside the
+    # locale document: files: [{file_key, file_name, is_folder}].
+    post = {
+        "zh_cn": {
+            "title": "报告",
+            "content": [[{"tag": "text", "text": "正文"}]],
+        },
+        "files": [
+            {"file_key": "file_a", "file_name": "report.pdf"},
+            {"file_key": "file_b"},
+            {"file_key": "dir_1", "file_name": "assets", "is_folder": True},
+        ],
+    }
+
+    t, r = flatten(PostContent(post=post))
+
+    assert "# 报告" in t
+    assert "正文" in t
+    assert '<file key="file_a" name="report.pdf"/>' in t
+    assert '<file key="file_b"/>' in t
+    assert '<folder key="dir_1" name="assets"/>' in t
+    # Files are downloadable resources; folders are tag-only.
+    assert [(x.type, x.file_key, x.file_name) for x in r] == [
+        ("file", "file_a", "report.pdf"),
+        ("file", "file_b", None),
+    ]
+
+
+def test_post_attachment_zone_ignores_empty_files():
+    post = {"zh_cn": {"content": [[{"tag": "text", "text": "hi"}]]}, "files": []}
+    t, r = flatten(PostContent(post=post))
+    assert "hi" in t
+    assert "<file" not in t
+    assert r == []
+
+
+def test_post_attachment_zone_escapes_key_and_handles_non_string_name():
+    # key with a quote must be escaped so it cannot forge tag attributes;
+    # non-string file_name degrades to no name attribute without throwing.
+    post = {
+        "zh_cn": {"content": [[{"tag": "text", "text": "hi"}]]},
+        "files": [
+            {"file_key": 'file_a" onmouseover="x', "file_name": "r.pdf"},
+            {"file_key": "file_b", "file_name": 123},
+        ],
+    }
+    t, r = flatten(PostContent(post=post))
+    # python attr() maps " -> ' (仓库惯例), so the key quote becomes a single
+    # quote inside the attribute value.
+    assert '<file key="file_a\' onmouseover=\'x" name="r.pdf"/>' in t
+    assert '<file key="file_b"/>' in t
+    assert [(x.type, x.file_key, x.file_name) for x in r] == [
+        ("file", 'file_a" onmouseover="x', "r.pdf"),
+        ("file", "file_b", None),
+    ]
+
+
+def test_post_attachment_zone_in_body_text():
+    # convert_body (used for InboundMessage.body_text) must also carry the
+    # attachment zone.
+    post = {
+        "zh_cn": {"content": [[{"tag": "text", "text": "hi"}]]},
+        "files": [{"file_key": "file_a", "file_name": "a.pdf"}],
+    }
+    body = convert_body(PostContent(post=post), drop_open_id="ou_x")
+    assert '<file key="file_a" name="a.pdf"/>' in body
+
+
+def test_post_attachment_zone_without_locale_document():
+    """A post carrying only an attachment zone must still render it.
+
+    The attachment zone is a sibling of the locale documents, so the
+    no-usable-document guard must not swallow it — otherwise the text says
+    nothing while resources[] still offers a downloadable file.
+    """
+    post = {"files": [{"file_key": "f1", "file_name": "solo.pdf"}]}
+
+    t, r = flatten(PostContent(post=post))
+
+    assert t == '<file key="f1" name="solo.pdf"/>'
+    assert [(x.type, x.file_key, x.file_name) for x in r] == [("file", "f1", "solo.pdf")]
+
+
+def test_post_attachment_zone_before_locale_key_keeps_plain_text():
+    """`files` may precede the locale key on the wire.
+
+    `PostContent.text` feeds the pipeline's @all probe and <at>-tag parsing, so
+    it must not go empty just because a non-document sibling sorts first.
+    """
+    from lark_channel.channel.normalize.registry import parse_message_content
+
+    content = parse_message_content(
+        "post",
+        {
+            "files": [{"file_key": "f1", "file_name": "a.pdf"}],
+            "zh_cn": {"title": "T", "content": [[{"tag": "text", "text": "hello"}]]},
+        },
+    )
+
+    assert content.title == "T"
+    assert "hello" in content.text
+
+
+def test_post_attachment_zone_tolerates_malformed_entries():
+    """Wire junk must be dropped entry-by-entry, never raise."""
+    post = {
+        "zh_cn": {"content": [[{"tag": "text", "text": "hi"}]]},
+        "files": [
+            "not-a-dict",
+            None,
+            {},                                   # no file_key
+            {"file_key": ""},                     # empty file_key
+            {"file_key": 123},                    # non-str file_key
+            {"file_key": "ok", "file_name": 42},  # non-str file_name
+        ],
+    }
+
+    t, r = flatten(PostContent(post=post))
+
+    assert "hi" in t
+    # Only the one usable entry survives, and the non-str name is dropped
+    # rather than reaching attr() and raising out of the pipeline.
+    assert '<file key="ok"/>' in t
+    assert [(x.type, x.file_key, x.file_name) for x in r] == [("file", "ok", None)]
+
+
+def test_post_attachment_zone_non_list_files_is_ignored():
+    post = {"zh_cn": {"content": [[{"tag": "text", "text": "hi"}]]}, "files": "nope"}
+    t, r = flatten(PostContent(post=post))
+    assert t == "hi"
+    assert r == []
+
+
+def test_post_attachment_zone_is_folder_requires_real_bool():
+    """A stringly `is_folder` must not hide a downloadable file behind <folder/>."""
+    post = {"files": [{"file_key": "f1", "is_folder": "false"}]}
+
+    t, r = flatten(PostContent(post=post))
+
+    assert t == '<file key="f1"/>'
+    assert [(x.type, x.file_key) for x in r] == [("file", "f1")]
+
+
+def test_post_attachment_zone_escapes_name_and_key():
+    post = {
+        "files": [{"file_key": 'k"1', "file_name": 'a"b\nc'}],
+    }
+
+    t, _ = flatten(PostContent(post=post))
+
+    # attr() maps `"` to `'` and newlines to spaces, so neither field can
+    # close the attribute and forge a sibling tag.
+    assert t == "<file key=\"k'1\" name=\"a'b c\"/>"
+
+
+def test_post_attachment_zone_dedups_against_inline_file_element():
+    """Inline `tag:file` wins over an attachment-zone entry with the same key."""
+    post = {
+        "zh_cn": {
+            "content": [[{"tag": "file", "file_key": "dup", "file_name": "inline.pdf"}]]
+        },
+        "files": [{"file_key": "dup", "file_name": "zone.pdf"}],
+    }
+
+    _, r = flatten(PostContent(post=post))
+
+    assert [(x.type, x.file_key, x.file_name) for x in r] == [
+        ("file", "dup", "inline.pdf")
+    ]
 
 
 def test_unknown_fallback_uses_raw_text():

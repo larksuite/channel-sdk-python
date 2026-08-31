@@ -60,14 +60,18 @@ def _flatten_post_text(post: Dict[str, Any]) -> Tuple[str, str]:
     """Return (title, plain_text) from a post AST.
 
     Post content has locale keys (`zh_cn`, `en_us`). We pick the first locale.
+
+    The top level can also carry non-document siblings alongside the locale
+    keys — notably the ``files`` attachment zone — so pick the first value that
+    actually is a document rather than the first key. Keying off position would
+    otherwise yield ``("", "")`` for ``{"files": [...], "zh_cn": {...}}``,
+    silently emptying ``PostContent.text`` and with it the pipeline's ``@all``
+    probe and ``<at>``-tag parsing.
     """
     if not isinstance(post, dict):
         return "", ""
-    first_key = next(iter(post), None)
-    if first_key is None:
-        return "", ""
-    locale_doc = post.get(first_key)
-    if not isinstance(locale_doc, dict):
+    locale_doc = next((v for v in post.values() if isinstance(v, dict)), None)
+    if locale_doc is None:
         return "", ""
     title = locale_doc.get("title") or ""
     lines: List[str] = []
