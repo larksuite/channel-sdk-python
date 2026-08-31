@@ -43,6 +43,25 @@ def test_merge_empty_inputs():
     assert merge_streaming_text("hi", "") == "hi"
 
 
+def test_merge_delta_only_never_drops_characters():
+    # Pure-delta producers (issue #9): a chunk that is a prefix of the
+    # accumulated text (or overlaps its tail) is brand-new content and must
+    # be concatenated, never treated as a rewind or overlap.
+    assert merge_streaming_text("40", "4", delta_only=True) == "404"
+    assert merge_streaming_text("210", "0", delta_only=True) == "2100"
+    assert merge_streaming_text("2026-07-2", "3", delta_only=True) == "2026-07-23"
+    assert merge_streaming_text("Hello", " world", delta_only=True) == "Hello world"
+    assert merge_streaming_text("Hello", "", delta_only=True) == "Hello"
+    assert merge_streaming_text("", "hi", delta_only=True) == "hi"
+
+
+def test_merge_default_mode_unchanged_by_delta_only():
+    # The default (auto) semantics keep the rewind/overlap heuristics.
+    assert merge_streaming_text("40", "4") == "40"
+    assert merge_streaming_text("Hello world", "Hello") == "Hello world"
+    assert merge_streaming_text("Hello wo", "world!") == "Hello world!"
+
+
 # ---- UpdateQueue ------------------------------------------------------------
 #
 # UpdateQueue is coalescing: at most 1 running + 1 pending. A burst of
@@ -231,7 +250,7 @@ def _make_cardkit_fakes():
     )
 
 
-def _mk_controller(deps, *, to="oc_1", rit="chat_id"):
+def _mk_controller(deps, *, to="oc_1", rit="chat_id", delta_only=False):
     cci, scbr, ucec, fsc = deps
     return MarkdownStreamController(
         to=to, receive_id_type=rit, reply_to=None, reply_in_thread=None,
@@ -240,6 +259,7 @@ def _mk_controller(deps, *, to="oc_1", rit="chat_id"):
         update_card_element_content=ucec,
         finish_streaming_card=fsc,
         min_ms=10, min_chars=3,
+        delta_only=delta_only,
     )
 
 
@@ -392,3 +412,24 @@ async def test_card_stream_error_appends_footer_element():
         await ctl.run(producer)
     last_elements = patched[-1]["body"]["elements"]
     assert any("generation interrupted" in (e.get("content") or "") for e in last_elements)
+
+
+@pytest.mark.asyncio
+async def test_markdown_stream_delta_only_preserves_character_chunks():
+    """Pure-delta producer (issue #9): chunks that are prefixes of the
+    accumulated text must not be dropped — the final card content keeps every
+    character."""
+    state, deps = _make_cardkit_fakes()
+    ctl = _mk_controller(deps, delta_only=True)
+
+    async def producer(s):
+        await s.append("40")
+        await s.append("4")
+        await s.append("210")
+        await s.append("0")
+
+    await ctl.run(producer)
+
+    assert len(state["elem_updates"]) >= 1
+    assert "404" in state["elem_updates"][-1][2]
+    assert "2100" in state["elem_updates"][-1][2]
