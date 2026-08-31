@@ -4,9 +4,29 @@ import re
 from typing import Any, Dict, List, Tuple
 
 from ...types import PostContent, ResourceDescriptor
+from ._utils import attr
 
 _AT_MENTION_RE = re.compile(r'<at(\s+)user_id(\s*)=(\s*)"(.*?)">(.*?)</at>')
 _IMAGE_KEY_RE = re.compile(r"!\[(.*?)\]\(([^)]+)\)")
+
+
+def _attachment_files(post: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Top-level attachment zone (``files`` array) of a post message.
+
+    The rich-text attachment zone lives at the top level of the post JSON,
+    outside any locale document: ``files: [{file_key, file_name, is_folder}]``.
+    Rendered the same way as the standalone file/folder message converters
+    (``<file key="..." name="..."/>`` / ``<folder .../>``).
+    """
+    if not isinstance(post, dict):
+        return []
+    files = post.get("files")
+    if not isinstance(files, list):
+        return []
+    return [
+        f for f in files
+        if isinstance(f, dict) and isinstance(f.get("file_key"), str) and f["file_key"]
+    ]
 
 
 def convert(content: PostContent) -> Tuple[str, List[ResourceDescriptor]]:
@@ -99,6 +119,28 @@ def _post_to_markdown(
         line = "".join(chunks)
         if line:
             lines.append(line)
+    # Attachment zone: files render as <file .../> (same tag style as the
+    # standalone file converter) and are surfaced as downloadable resources;
+    # folders render as <folder .../> tags only (mirrors the standalone folder
+    # converter, resources=[]).
+    for f in _attachment_files(post):
+        key = f["file_key"]
+        name = f.get("file_name")
+        # Both key and name are escaped: downstream parses these tags as
+        # structured info, so a quote inside a key must not be able to forge
+        # an extra attribute. Non-string file_name degrades to no attribute.
+        if not isinstance(name, str):
+            name = ""
+        if f.get("is_folder"):
+            if name:
+                lines.append(f'<folder key="{attr(key)}" name="{attr(name)}"/>')
+            else:
+                lines.append(f'<folder key="{attr(key)}"/>')
+        else:
+            if name:
+                lines.append(f'<file key="{attr(key)}" name="{attr(name)}"/>')
+            else:
+                lines.append(f'<file key="{attr(key)}"/>')
     return "\n\n".join(lines).strip(), resources
 
 
@@ -135,6 +177,12 @@ def _post_resources(post: Dict[str, Any]) -> List[ResourceDescriptor]:
                     add("audio", el.get("file_key"))
                 elif tag == "file":
                     add("file", el.get("file_key"), file_name=el.get("file_name"))
+    # Attachment zone: files are downloadable resources; folders are rendered
+    # as tags only (mirrors the standalone folder converter, resources=[]).
+    for f in _attachment_files(post):
+        if f.get("is_folder"):
+            continue
+        add("file", f.get("file_key"), file_name=f.get("file_name"))
     return resources
 
 
