@@ -1,4 +1,3 @@
-import hashlib
 import hmac
 import json
 import logging
@@ -19,6 +18,10 @@ from lark_channel.event.security import (
     build_error_response_content,
     should_record_security_audit,
 )
+from lark_channel.core.webhook_signature import (
+    ReplayGuard,
+    verify_webhook_signature,
+)
 from .model import Card
 
 if TYPE_CHECKING:
@@ -32,6 +35,7 @@ class CardActionHandler(HttpHandler):
         self._verification_token: Optional[str] = None
         self._processor: Optional[Callable[[Card], Any]] = None
         self._security = security or _default_security_config()
+        self._replay_guard_instance: Optional[ReplayGuard] = None
 
     def do(self, req: RawRequest) -> RawResponse:
         if logger.isEnabledFor(logging.DEBUG):
@@ -204,15 +208,25 @@ class CardActionHandler(HttpHandler):
         )
 
     def _verify_sign(self, request: RawRequest) -> None:
-        if self._verification_token is None or self._verification_token == "":
-            return
-        timestamp = request.headers.get(LARK_REQUEST_TIMESTAMP)
-        nonce = request.headers.get(LARK_REQUEST_NONCE)
-        signature = request.headers.get(LARK_REQUEST_SIGNATURE)
-        bs = (timestamp + nonce + self._verification_token).encode(UTF_8) + request.body
-        h = hashlib.sha1(bs)
-        if signature != h.hexdigest():
-            raise AccessDeniedException("signature verification failed")
+        verify_webhook_signature(
+            request,
+            secret=self._verification_token,
+            algorithm="sha1",
+            security=self._security,
+            record_audit=lambda reason, action: self._record_security_audit(
+                reason, action=action, request=request
+            ),
+            warn=lambda msg: logger.warning("%s", msg),
+            replay_guard=self._replay_guard(),
+        )
+
+    def _replay_guard(self) -> Optional[ReplayGuard]:
+        ttl = self._security.replay_protection_seconds
+        if ttl is None:
+            return None
+        if self._replay_guard_instance is None:
+            self._replay_guard_instance = ReplayGuard(ttl)
+        return self._replay_guard_instance
 
     @staticmethod
     def builder(
