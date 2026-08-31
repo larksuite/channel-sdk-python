@@ -218,9 +218,9 @@ class EventDispatcherHandler(HttpHandler):
 
     def _has_signature_headers(self, request: RawRequest) -> bool:
         return (
-            Strings.is_not_empty(request.headers.get(LARK_REQUEST_TIMESTAMP))
-            and Strings.is_not_empty(request.headers.get(LARK_REQUEST_NONCE))
-            and Strings.is_not_empty(request.headers.get(LARK_REQUEST_SIGNATURE))
+            Strings.is_not_empty(_get_header(request.headers, LARK_REQUEST_TIMESTAMP))
+            and Strings.is_not_empty(_get_header(request.headers, LARK_REQUEST_NONCE))
+            and Strings.is_not_empty(_get_header(request.headers, LARK_REQUEST_SIGNATURE))
         )
 
     def _record_security_audit(
@@ -245,9 +245,9 @@ class EventDispatcherHandler(HttpHandler):
     def _verify_sign(self, request: RawRequest) -> None:
         if self._encrypt_key is None or self._encrypt_key == "":
             return
-        timestamp = request.headers.get(LARK_REQUEST_TIMESTAMP)
-        nonce = request.headers.get(LARK_REQUEST_NONCE)
-        signature = request.headers.get(LARK_REQUEST_SIGNATURE)
+        timestamp = _get_header(request.headers, LARK_REQUEST_TIMESTAMP)
+        nonce = _get_header(request.headers, LARK_REQUEST_NONCE)
+        signature = _get_header(request.headers, LARK_REQUEST_SIGNATURE)
         bs = (timestamp + nonce + self._encrypt_key).encode(UTF_8) + request.body
         if signature != hashlib.sha256(bs).hexdigest():
             raise AccessDeniedException("signature verification failed")
@@ -423,3 +423,16 @@ def _default_security_config():
     from lark_channel.channel.config import SecurityConfig
 
     return SecurityConfig()
+
+
+def _get_header(headers: Dict[str, str], name: str) -> Optional[str]:
+    # ASGI servers (Starlette/FastAPI) hand handlers lowercase header names,
+    # so an exact-case lookup silently misses X-Lark-* signature headers.
+    value = headers.get(name)
+    if value is not None:
+        return value
+    lname = name.lower()
+    for key, val in headers.items():
+        if key.lower() == lname:
+            return val
+    return None
