@@ -83,6 +83,41 @@ async def test_reply_via_reply_to():
 
 
 @pytest.mark.asyncio
+async def test_thread_reply_every_chunk_replies_to_root():
+    """Issue #5: with reply_in_thread=True, EVERY chunk of a long reply must
+    reply to the root — otherwise chunks after the first leak out of the
+    thread into the main timeline."""
+    d, calls = make_driver()
+    s = OutboundSender(d, OutboundConfig(text_chunk_limit=10, chunk_mode="none"))
+    r = await s.send(
+        OutboundText(text="a" * 25),
+        reply_to="om_root",
+        reply_in_thread=True,
+    )
+    assert r.success is True
+    reply_calls = [c for c in calls if c["op"] == "reply"]
+    assert len(reply_calls) == 3
+    for c in reply_calls:
+        assert c["message_id"] == "om_root"
+        assert c["reply_in_thread"] is True
+
+
+@pytest.mark.asyncio
+async def test_flat_reply_only_first_chunk_quotes_parent():
+    """Legacy flat-reply behavior: only the first chunk quote-replies the
+    parent; subsequent chunks are fresh top-level messages."""
+    d, calls = make_driver()
+    s = OutboundSender(d, OutboundConfig(text_chunk_limit=10, chunk_mode="none"))
+    r = await s.send(OutboundText(text="a" * 25), reply_to="om_parent")
+    assert r.success is True
+    reply_calls = [c for c in calls if c["op"] == "reply"]
+    create_calls = [c for c in calls if c["op"] == "create"]
+    assert len(reply_calls) == 1
+    assert reply_calls[0]["message_id"] == "om_parent"
+    assert len(create_calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_chunks_long_text():
     d, calls = make_driver()
     s = OutboundSender(d, OutboundConfig(text_chunk_limit=10, chunk_mode="none"))
